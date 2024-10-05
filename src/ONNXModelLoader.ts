@@ -1,25 +1,17 @@
-import { InferenceSession, Tensor, env } from 'onnxruntime-web';
+import init, { Session, Input } from "@webonnx/wonnx-wasm";
 
 export class ONNXModelLoader {
-  private session: InferenceSession | null = null;
+  private session: Session | null = null;
 
-  constructor() {
-    // Enable WebGL backend for GPU support
-    env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
-    env.webgl.contextId = 'webgl2';
-  }
 
   async loadModel(modelUrl: string): Promise<void> {
     try {
       console.log('Starting model load from:', modelUrl);
-      const response = await fetch(modelUrl);
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const modelData = await response.arrayBuffer();
-      console.log('Model data fetched, size:', modelData.byteLength);
+      const modelBytes = await this.fetchBytes(modelUrl);
+      console.log('Model data fetched, size:', modelBytes.length);
       
-      this.session = await InferenceSession.create(modelData, { executionProviders: ['webgl'] });
+      await init(); // Initialize WONNX
+      this.session = await this.createSession(modelBytes);
       console.log('Model loaded successfully');
     } catch (error) {
       console.error('Error loading the model:', error);
@@ -27,25 +19,45 @@ export class ONNXModelLoader {
     }
   }
 
+  private async fetchBytes(url: string): Promise<Uint8Array> {
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+    const blob = await response.arrayBuffer();
+    return new Uint8Array(blob);
+  }
+
+  private async createSession(modelBytes: Uint8Array): Promise<Session> {
+    const providers = ['webgpu', 'webgl', 'wasm','cpu'] as const;
+    for (const provider of providers) {
+      try {
+        console.log(`Trying to create session with ${provider}`);
+        const session = await Session.fromBytes(modelBytes);
+        console.log(`Successfully created session with ${provider}`);
+        return session;
+      } catch (error) {
+        console.warn(`Failed to create session with ${provider}:`, error);
+      }
+    }
+    throw new Error("Failed to create session with any available provider");
+  }
   async runInference(xCurrent: Float32Array, xReference: Float32Array): Promise<[Float32Array, Float32Array, Float32Array]> {
     if (!this.session) {
       throw new Error('Model not loaded. Call loadModel() first.');
     }
 
-    const inputShape = [1, 3, 256, 256]; // Adjust based on your model's input shape
-    const xCurrentTensor = new Tensor('float32', xCurrent, inputShape);
-    const xReferenceTensor = new Tensor('float32', xReference, inputShape);
-
-    const feeds = {
-      x_current: xCurrentTensor,
-      x_reference: xReferenceTensor
-    };
+    const input = new Input();
+    input.insert("x_current", xCurrent);
+    input.insert("x_reference", xReference);
 
     try {
-      const outputMap = await this.session.run(feeds);
-      const fr = outputMap.f_r.data as Float32Array;
-      const tr = outputMap.t_r.data as Float32Array;
-      const tc = outputMap.t_c.data as Float32Array;
+      const result = await this.session.run(input);
+      const fr = result.get("f_r") as Float32Array;
+      const tr = result.get("t_r") as Float32Array;
+      const tc = result.get("t_c") as Float32Array;
+
+      input.free(); // Free the input after use
 
       return [fr, tr, tc];
     } catch (error) {
@@ -54,7 +66,7 @@ export class ONNXModelLoader {
     }
   }
 
-  // Helper method to convert image to Float32Array
+  // Helper method to convert image to Float32Array (unchanged)
   static async imageToFloat32Array(imageUrl: string): Promise<Float32Array> {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -83,4 +95,3 @@ export class ONNXModelLoader {
     });
   }
 }
-

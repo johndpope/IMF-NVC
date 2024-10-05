@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@webonnx/wonnx-wasm':
+        specifier: ^0.5.1
+        version: 0.5.1
       onnxruntime-web:
         specifier: ^1.19.2
         version: 1.19.2
@@ -488,6 +491,9 @@ packages:
 
   '@webassemblyjs/wast-printer@1.12.1':
     resolution: {integrity: sha512-+X4WAlOisVWQMikjbcvY2e0rwPsKQ9F688lksZhBcPycBBuii3O7m8FACbDMWDojpAqvjIncrG8J0XHKyQfVeA==}
+
+  '@webonnx/wonnx-wasm@0.5.1':
+    resolution: {integrity: sha512-t0+w2ZMb6LC1xKs0hqw3wx6i2Et4kNH6bfHtgjYj+fufEhQ6J2pE+gabOo8JOIqniQu9cA+jP3VwoBQ6f4+L9w==}
 
   '@webpack-cli/configtest@1.2.0':
     resolution: {integrity: sha512-4FB8Tj6xyVkyqjj1OaTqCjXYULB9FMkqQ8yGrZjRDrYh0nOE+7Lhs45WioWQQMV+ceFlE368Ukhe6xdvJM9Egg==}
@@ -2968,6 +2974,8 @@ snapshots:
     dependencies:
       '@webassemblyjs/ast': 1.12.1
       '@xtuc/long': 4.2.2
+
+  '@webonnx/wonnx-wasm@0.5.1': {}
 
   '@webpack-cli/configtest@1.2.0(webpack-cli@4.10.0)(webpack@5.95.0)':
     dependencies:

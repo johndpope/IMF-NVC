@@ -6,7 +6,9 @@ async function main() {
     
     try {
       console.log('Attempting to load model');
-      await modelLoader.loadModel('/imf_encoder_web.onnx');
+      // await modelLoader.loadModel('/imf_encoder_web.onnx');
+      await modelLoader.loadModel('/opt-squeeze.onnx');
+      
       console.log('Model loaded successfully');
   
       console.log('Attempting to load frame1.png');

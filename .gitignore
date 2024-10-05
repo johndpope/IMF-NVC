@@ -2,3 +2,4 @@
 node_modules/*
 dist/*
 public/imf_encoder_web.onnx
+public/opt-squeeze.onnx
