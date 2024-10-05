@@ -1,0 +1,285 @@
+{
+    "supportedOperators": [
+      {
+        "name": "Abs",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Acos",
+        "versions": ["7+"]
+      },
+      {
+        "name": "Add",
+        "versions": ["7-12", "13", "14+"]
+      },
+      {
+        "name": "And",
+        "versions": ["7+"]
+      },
+      {
+        "name": "Asin",
+        "versions": ["7+"]
+      },
+      {
+        "name": "Atan",
+        "versions": ["7+"]
+      },
+      {
+        "name": "AveragePool",
+        "versions": ["7-9", "10", "11-18", "19+"]
+      },
+      {
+        "name": "BatchNormalization",
+        "versions": ["7-8", "9-13", "14", "15+"]
+      },
+      {
+        "name": "Cast",
+        "versions": ["6-8", "9-12", "13-18", "19-20", "21+"]
+      },
+      {
+        "name": "Ceil",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Clip",
+        "versions": ["6-10", "11", "12", "13+"]
+      },
+      {
+        "name": "Concat",
+        "versions": ["4-10", "11-12", "13+"]
+      },
+      {
+        "name": "Conv",
+        "versions": ["1-10", "11+"]
+      },
+      {
+        "name": "ConvTranspose",
+        "versions": ["1-10", "11+"]
+      },
+      {
+        "name": "Cos",
+        "versions": ["7+"]
+      },
+      {
+        "name": "DepthToSpace",
+        "versions": ["1-10", "11-12", "13+"]
+      },
+      {
+        "name": "Div",
+        "versions": ["7-12", "13", "14+"]
+      },
+      {
+        "name": "Dropout",
+        "versions": ["7-9", "10-11", "12", "13+"]
+      },
+      {
+        "name": "Elu",
+        "versions": ["6+"]
+      },
+      {
+        "name": "Equal",
+        "versions": ["7-10", "11-12", "13-18", "19+"]
+      },
+      {
+        "name": "Exp",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Flatten",
+        "versions": ["1-8", "9-10", "11-12", "13-20", "21+"]
+      },
+      {
+        "name": "Floor",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Gather",
+        "versions": ["1-10", "11-12", "13+"]
+      },
+      {
+        "name": "Gemm",
+        "versions": ["7-8", "9-10", "11-12", "13+"]
+      },
+      {
+        "name": "GlobalAveragePool",
+        "versions": ["1+"]
+      },
+      {
+        "name": "GlobalMaxPool",
+        "versions": ["1+"]
+      },
+      {
+        "name": "Greater",
+        "versions": ["7-8", "9-12", "13+"]
+      },
+      {
+        "name": "Identity",
+        "versions": ["1-12", "13", "14-15", "16-18", "19-20", "21+"]
+      },
+      {
+        "name": "InstanceNormalization",
+        "versions": ["6+"]
+      },
+      {
+        "name": "LeakyRelu",
+        "versions": ["6-15", "16+"]
+      },
+      {
+        "name": "Less",
+        "versions": ["7-8", "9-12", "13+"]
+      },
+      {
+        "name": "Log",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "LRN",
+        "versions": ["1-12", "13+"]
+      },
+      {
+        "name": "MatMul",
+        "versions": ["1-8", "9-12", "13+"]
+      },
+      {
+        "name": "MaxPool",
+        "versions": ["1-7", "8-9", "10", "11", "12+"]
+      },
+      {
+        "name": "Mul",
+        "versions": ["7-12", "13", "14+"]
+      },
+      {
+        "name": "Neg",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Not",
+        "versions": ["1+"]
+      },
+      {
+        "name": "Or",
+        "versions": ["7+"]
+      },
+      {
+        "name": "PRelu",
+        "versions": ["7-8", "9-15", "16+"]
+      },
+      {
+        "name": "Pad",
+        "versions": ["2-10", "11-12", "13-17", "18", "19-20", "21+"]
+      },
+      {
+        "name": "Pow",
+        "versions": ["7-11", "12", "13-14", "15+"]
+      },
+      {
+        "name": "ReduceLogSum",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      },
+      {
+        "name": "ReduceMax",
+        "versions": ["1-10", "11", "12", "13-17", "18-19", "20+"]
+      },
+      {
+        "name": "ReduceMean",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      },
+      {
+        "name": "ReduceMin",
+        "versions": ["1-10", "11", "12", "13-17", "18-19", "20+"]
+      },
+      {
+        "name": "ReduceProd",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      },
+      {
+        "name": "ReduceSum",
+        "versions": ["1-10", "11-12"]
+      },
+      {
+        "name": "ReduceSumSquare",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      },
+      {
+        "name": "Relu",
+        "versions": ["6-12", "13", "14+"]
+      },
+      {
+        "name": "Reshape",
+        "versions": ["5-12", "13", "14-18", "19-20", "21+"]
+      },
+      {
+        "name": "Resize",
+        "versions": ["10", "11-12", "13-17", "18", "19+"]
+      },
+      {
+        "name": "Shape",
+        "versions": ["1-12", "13-14", "15-18", "19-20", "21+"]
+      },
+      {
+        "name": "Sigmoid",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Sin",
+        "versions": ["7+"]
+      },
+      {
+        "name": "Slice",
+        "versions": ["1-9", "10", "11-12", "13+"]
+      },
+      {
+        "name": "Softmax",
+        "versions": ["1-10", "11-12", "13+"]
+      },
+      {
+        "name": "Split",
+        "versions": ["2-10", "11-12"]
+      },
+      {
+        "name": "Sqrt",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Squeeze",
+        "versions": ["1-10", "11-12", "13-20", "21+"]
+      },
+      {
+        "name": "Sub",
+        "versions": ["7-12", "13", "14+"]
+      },
+      {
+        "name": "Sum",
+        "versions": ["6-7", "8-12", "13+"]
+      },
+      {
+        "name": "Tan",
+        "versions": ["7+"]
+      },
+      {
+        "name": "Tanh",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Tile",
+        "versions": ["6-12", "13+"]
+      },
+      {
+        "name": "Transpose",
+        "versions": ["1-12", "13-20", "21+"]
+      },
+      {
+        "name": "Unsqueeze",
+        "versions": ["1-10", "11-12", "13-20", "21+"]
+      },
+      {
+        "name": "Upsample",
+        "versions": ["7-8", "9"]
+      },
+      {
+        "name": "Xor",
+        "versions": ["7+"]
+      }
+    ]
+  }
+  

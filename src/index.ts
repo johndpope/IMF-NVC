@@ -7,7 +7,9 @@ async function main() {
     try {
       console.log('Attempting to load model');
       // await modelLoader.loadModel('/imf_encoder_web.onnx');
-      await modelLoader.loadModel('/opt-squeeze.onnx');
+      // await modelLoader.loadModel('/imf_encoder.onnx');
+      await modelLoader.loadModel('/imf_simple.onnx');
+      // await modelLoader.loadModel('/opt-squeeze.onnx');
       
       console.log('Model loaded successfully');
   

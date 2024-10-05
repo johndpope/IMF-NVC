@@ -1,0 +1,985 @@
+{
+    "supportedOperators": [
+      {
+        "name": "Abs",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Acos",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7+"]
+          }
+        ]
+      },
+      {
+        "name": "Acosh",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["9+"]
+          }
+        ]
+      },
+      {
+        "name": "Add",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-12", "13", "14+"]
+          }
+        ]
+      },
+      {
+        "name": "ArgMax",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "ArgMin",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Asin",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7+"]
+          }
+        ]
+      },
+      {
+        "name": "Asinh",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["9+"]
+          }
+        ]
+      },
+      {
+        "name": "Atan",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7+"]
+          }
+        ]
+      },
+      {
+        "name": "Atanh",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["9+"]
+          }
+        ]
+      },
+      {
+        "name": "Attention",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ],
+        "comments": "need implementing mask and past/present"
+      },
+      {
+        "name": "AveragePool",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-9", "10", "11+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["7-9", "10", "11+"]
+          }
+        ],
+        "comments": "need perf optimization; need implementing activation"
+      },
+      {
+        "name": "BatchNormalization",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-8", "9-13", "14", "15+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["7-8", "9-13", "14", "15+"]
+          }
+        ]
+      },
+      {
+        "name": "BiasAdd",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "BiasSplitGelu",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Cast",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-8", "9-12", "13-18", "19+"]
+          }
+        ]
+      },
+      {
+        "name": "Ceil",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Clip",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-10", "11", "12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Concat",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-3", "4-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Conv",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["1-10", "11+"]
+          }
+        ],
+        "comments": "need perf optimization; conv3d is not supported; need implementing activation"
+      },
+      {
+        "name": "ConvTranspose",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["1-10", "11+"]
+          }
+        ],
+        "comments": "need perf optimization; ConvTranspose3d is not supported; need implementing activation"
+      },
+      {
+        "name": "Cos",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7+"]
+          }
+        ]
+      },
+      {
+        "name": "Cosh",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["9+"]
+          }
+        ]
+      },
+      {
+        "name": "CumSum",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["11-13", "14+"]
+          }
+        ]
+      },
+      {
+        "name": "DepthToSpace",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["11-12", "13+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "DequantizeLinear",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["10-12", "13-18", "19-20", "21+"]
+          }
+        ]
+      },
+      {
+        "name": "Div",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-12", "13", "14+"]
+          }
+        ]
+      },
+      {
+        "name": "Einsum",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["12+"]
+          }
+        ]
+      },
+      {
+        "name": "Elu",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6+"]
+          }
+        ]
+      },
+      {
+        "name": "Equal",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-10", "11-12", "13-18", "19+"]
+          }
+        ]
+      },
+      {
+        "name": "Erf",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["9-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Exp",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Expand",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["8-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "FastGelu",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Flatten",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-8", "9-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Floor",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "FusedConv",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Gather",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "GatherBlockQuantized",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "GatherElements",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "Gelu",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["20+"]
+          },
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Gemm",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-8", "9-10", "11-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "GlobalAveragePool",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "GlobalMaxPool",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Greater",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-8", "9-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "GreaterOrEqual",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["12-15", "16+"]
+          }
+        ]
+      },
+      {
+        "name": "GroupQueryAttention",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "HardSigmoid",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6+"]
+          }
+        ]
+      },
+      {
+        "name": "If",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-10", "11-12", "13-18", "19+"]
+          }
+        ]
+      },
+      {
+        "name": "InstanceNormalization",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["6+"]
+          }
+        ]
+      },
+      {
+        "name": "LayerNormalization",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-16", "17+"]
+          }
+        ]
+      },
+      {
+        "name": "LeakyRelu",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-15", "16+"]
+          }
+        ]
+      },
+      {
+        "name": "Less",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-8", "9-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "LessOrEqual",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["12-15", "16+"]
+          }
+        ]
+      },
+      {
+        "name": "Log",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["6-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "MatMul",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-12", "13+"]
+          }
+        ]
+      },
+      {
+        "name": "MatMulNBits",
+        "domains": [
+          {
+            "name": "com.microsoft",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "MaxPool",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1-7", "8-9", "10", "11", "12+"]
+          },
+          {
+            "name": "com.ms.internal.nhwc",
+            "versions": ["1-7", "8-9", "10", "11", "12+"]
+          }
+        ],
+        "comments": "need perf optimization; need implementing activation"
+      },
+      {
+        "name": "MemcpyFromHost",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "MemcpyToHost",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["1+"]
+          }
+        ]
+      },
+      {
+        "name": "Mul",
+        "domains": [
+          {
+            "name": "ai.onnx",
+            "versions": ["7-12", "13", "14+"]
+          }
+        ]
+      },
+    {
+    "name": "MultiHeadAttention",
+    "domains": [
+      {
+        "name": "com.microsoft",
+        "versions": ["1+"]
+      }
+    ],
+    "comments": "need implementing mask and past/present"
+  },
+  {
+    "name": "Neg",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Not",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "Pad",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["2-10", "11-12", "13-17", "18", "19+"]
+      }
+    ]
+  },
+  {
+    "name": "Pow",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["7-11", "12", "13-14", "15+"]
+      }
+    ]
+  },
+  {
+    "name": "QuickGelu",
+    "domains": [
+      {
+        "name": "com.microsoft",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "Range",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["11+"]
+      }
+    ]
+  },
+  {
+    "name": "Reciprocal",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceL1",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceL2",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceLogSum",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceLogSumExp",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceMax",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11", "12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceMean",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceMin",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11", "12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceProd",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceSum",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "ReduceSumSquare",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "Relu",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13", "14+"]
+      }
+    ]
+  },
+  {
+    "name": "Reshape",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["5-12", "13", "14-18", "19-20", "21+"]
+      }
+    ],
+    "comments": "no GPU kernel"
+  },
+  {
+    "name": "Resize",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["10", "11-12", "13-17", "18", "19+"]
+      },
+      {
+        "name": "com.ms.internal.nhwc",
+        "versions": ["10", "11-12", "13-17", "18", "19+"]
+      }
+    ],
+    "comments": "CoordinateTransformMode align_corners is not supported with downsampling"
+  },
+  {
+    "name": "RotaryEmbedding",
+    "domains": [
+      {
+        "name": "com.microsoft",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "Shape",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-12", "13-14", "15-18", "19-20", "21+"]
+      }
+    ],
+    "comments": "no GPU kernel; an ORT warning is generated - need to fix"
+  },
+  {
+    "name": "Sigmoid",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "SimplifiedLayerNormalization",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "Sin",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["7+"]
+      }
+    ]
+  },
+  {
+    "name": "Sinh",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["9+"]
+      }
+    ]
+  },
+  {
+    "name": "SkipLayerNormalization",
+    "domains": [
+      {
+        "name": "com.microsoft",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "SkipSimplifiedLayerNormalization",
+    "domains": [
+      {
+        "name": "com.microsoft",
+        "versions": ["1+"]
+      }
+    ]
+  },
+  {
+    "name": "Slice",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-9", "10", "11-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Softmax",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Split",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1", "2-10", "11-12", "13-17", "18+"]
+      }
+    ]
+  },
+  {
+    "name": "Sqrt",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Squeeze",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Sub",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["7-12", "13", "14+"]
+      }
+    ]
+  },
+  {
+    "name": "Tan",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["7+"]
+      }
+    ]
+  },
+  {
+    "name": "Tanh",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "ThresholdedRelu",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["10+"]
+      }
+    ]
+  },
+  {
+    "name": "Tile",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["6-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Transpose",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-12", "13+"]
+      }
+    ],
+    "comments": "need perf optimization"
+  },
+  {
+    "name": "Unsqueeze",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["1-10", "11-12", "13+"]
+      }
+    ]
+  },
+  {
+    "name": "Where",
+    "domains": [
+      {
+        "name": "ai.onnx",
+        "versions": ["9-15", "16+"]
+      }
+    ]
+  }
+]
+}
