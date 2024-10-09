@@ -5,3 +5,4 @@ public/imf_encoder_web.onnx
 public/opt-squeeze.onnx
 public/imf_encoder.onnx
 public/imf_simple.onnx
+package-lock.json
