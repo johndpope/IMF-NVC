@@ -6,3 +6,6 @@ public/opt-squeeze.onnx
 public/imf_encoder.onnx
 public/imf_simple.onnx
 package-lock.json
+mymodel_quantized_optimized.pt
+model.onnx
+mymodel_optimized.pt
