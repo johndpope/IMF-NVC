@@ -18,8 +18,15 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@aislamov/onnxruntime-web64": "^1.0.6",
     "@webonnx/wonnx-wasm": "^0.5.1",
-    "onnxruntime-web": "^1.19.2"
+    "fs": "0.0.1-security",
+    "http": "0.0.1-security",
+    "https": "^1.0.0",
+    "onnxruntime-node": "^1.19.2",
+    "onnxruntime-web": "^1.19.2",
+    "sharp": "^0.33.5",
+    "url": "^0.11.4"
   },
   "devDependencies": {
     "@types/jest": "^27.0.3",

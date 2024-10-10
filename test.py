@@ -1,51 +1,47 @@
-import json
 import onnx
-from onnxsim import simplify
+import numpy as np
+import os
 
-def load_supported_ops(json_file):
-    with open(json_file, 'r') as f:
-        data = json.load(f)
-    return set(op['name'] for op in data['supportedOperators'])
+def convert_int64_tensors(model_path, output_path):
+    # Check if input file exists
+    if not os.path.exists(model_path):
+        print(f"Error: Input file '{model_path}' not found.")
+        return
 
-def audit_onnx_ops(model_file, webgpu_file, webgl_file):
-    # Load the ONNX model
-    model = onnx.load(model_file)
-    
-    # Optionally simplify the model
-    model, check = simplify(model)
-    if not check:
-        print("Warning: Model simplification failed. Using original model.")
-    
-    # Extract operators from the model
-    model_ops = set(node.op_type for node in model.graph.node)
-    
-    # Load supported operators for WebGPU and WebGL
-    webgpu_ops = load_supported_ops(webgpu_file)
-    webgl_ops = load_supported_ops(webgl_file)
-    
-    print(f"Total operators in the model: {len(model_ops)}")
-    print("\nOperators used in the model:")
-    for op in sorted(model_ops):
-        webgpu_support = "Supported" if op in webgpu_ops else "Not supported"
-        webgl_support = "Supported" if op in webgl_ops else "Not supported"
-        print(f"- {op:<20} WebGPU: {webgpu_support:<15} WebGL: {webgl_support}")
-    
-    print("\nSummary:")
-    print(f"WebGPU supported: {len(model_ops.intersection(webgpu_ops))}/{len(model_ops)} "
-          f"({len(model_ops.intersection(webgpu_ops))/len(model_ops)*100:.2f}%)")
-    print(f"WebGL supported: {len(model_ops.intersection(webgl_ops))}/{len(model_ops)} "
-          f"({len(model_ops.intersection(webgl_ops))/len(model_ops)*100:.2f}%)")
-    
-    print("\nOperators not supported in WebGPU:")
-    for op in sorted(model_ops - webgpu_ops):
-        print(f"- {op}")
-    
-    print("\nOperators not supported in WebGL:")
-    for op in sorted(model_ops - webgl_ops):
-        print(f"- {op}")
+    try:
+        model = onnx.load(model_path)
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        return
 
-if __name__ == "__main__":
-    model_file = './public/imf_encoder.onnx'
-    webgpu_file = "webgpu_supported_ops.json"
-    webgl_file = "webgl_supported_ops.json"
-    audit_onnx_ops(model_file, webgpu_file, webgl_file)
+    for initializer in model.graph.initializer:
+        if initializer.data_type == onnx.TensorProto.INT64:
+            arr = np.frombuffer(initializer.raw_data, dtype=np.int64).reshape(initializer.dims)
+            if arr.size == 0:
+                print(f"Warning: Empty INT64 tensor found: {initializer.name}. Skipping conversion.")
+                continue
+            if np.min(arr) < -2**31 or np.max(arr) > 2**31 - 1:
+                # Convert to float32 if values exceed INT32 range
+                new_arr = arr.astype(np.float32)
+                initializer.data_type = onnx.TensorProto.FLOAT
+            else:
+                # Convert to INT32
+                new_arr = arr.astype(np.int32)
+                initializer.data_type = onnx.TensorProto.INT32
+            initializer.raw_data = new_arr.tobytes()
+    
+    # Update input/output tensors if necessary
+    for tensor in list(model.graph.input) + list(model.graph.output):
+        if tensor.type.tensor_type.elem_type == onnx.TensorProto.INT64:
+            tensor.type.tensor_type.elem_type = onnx.TensorProto.INT32
+    
+    try:
+        onnx.save(model, output_path)
+        print(f"Converted model saved to: {output_path}")
+    except Exception as e:
+        print(f"Error saving converted model: {e}")
+
+# Use the function
+input_model_path = "./public/quantized_imf_encoder_web.onnx"
+output_model_path = "./public/converted_imf_encoder.onnx"
+convert_int64_tensors(input_model_path, output_model_path)

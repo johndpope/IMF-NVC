@@ -4,23 +4,51 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IMF Neural Video Codec POC</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        h1 {
+            color: #333;
+        }
+        h2 {
+            color: #666;
+        }
+        code {
+            background-color: #f4f4f4;
+            padding: 2px 4px;
+            border-radius: 4px;
+        }
+    </style>
 </head>
 <body>
     <h1>IMF Neural Video Codec POC</h1>
-    troubles ? chrome://gpu/
+    <h1>WebGPU Troubleshooting Guide</h1>
 
-    https://stackoverflow.com/questions/65366815/cannot-read-property-requestdevice-of-null
+    <h2>Graphics Acceleration Settings</h2>
+    <p>WebGPU is disabled when the user has turned off "Use graphics acceleration when available" in <code>chrome://settings/system</code>. Check to see if this setting is turned off and turn it back on.</p>
 
-    WebGPU is disabled when the user has turned off "Use graphics acceleration when available" in chrome://settings/system. Check to see if this setting is turned off and turn it back on
+    <h2>Platform Support</h2>
+    <p>WebGPU is not supported on all platforms yet. You can enable the <code>chrome://flags/#enable-unsafe-webgpu</code> flag and restart Chrome. For Linux experimental support, you'll also need to enable the <code>chrome://flags/#enable-vulkan</code> flag. Check out WebGPU support in Headless Chrome to learn more.</p>
 
-WebGPU is not supported on this platform yet. You can enable the chrome://flags/#enable-unsafe-webgpu flag and restart Chrome. For Linux experimental support, you'll also need to enable the chrome://flags/#enable-vulkan flag. Check out WebGPU support in Headless Chrome to learn more.
+    <h2>GPU Blocklist</h2>
+    <p>The GPU hardware may have been specifically blocklisted. If you see "WebGPU has been disabled via blocklist or the command line" in <code>chrome://gpu</code>, you can disable the WebGPU adapters blocklist by enabling the <code>chrome://flags/#enable-unsafe-webgpu</code> flag and restarting Chrome.</p>
 
-The GPU hardware has been specifically blocklisted. If you see "WebGPU has been disabled via blocklist or the command line" in chrome://gpu, you can disable the WebGPU adapters blocklist by enabling the chrome://flags/#enable-unsafe-webgpu flag and restarting Chrome.
+    <h2>Adapter Options</h2>
+    <p>There might be no matching GPU adapter for the options passed in <code>requestAdapter()</code>. Try calling <code>requestAdapter()</code> with different options.</p>
 
-There is no matching GPU adapter for the options passed in requestAdapter(). Try calling requestAdapter() with different options.
+    <h2>GPU Requirements</h2>
+    <p>WebGPU requires a GPU (either hardware or software-emulated). You can check if Chrome detects a GPU by visiting <code>chrome://gpu</code>.</p>
 
-WebGPU requires a GPU (either hardware or software-emulated). You can check if Chrome detects a GPU by visiting chrome://gpu.
-
+    <h2>Useful Chrome URLs</h2>
+    <ul>
+        <li><code>chrome://gpu/</code></li>
+        <li><code>chrome://settings/system</code></li>
+    </ul>
     <div id="app">
         <img src="/frame1.png" alt="Frame 1" width="256" height="256">
         <img src="/frame2.png" alt="Frame 2" width="256" height="256">

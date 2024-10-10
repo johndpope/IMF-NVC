@@ -1,7 +1,7 @@
 
 node_modules/*
 dist/*
-public/imf_encoder_web.onnx
+*.onnx
 public/opt-squeeze.onnx
 public/imf_encoder.onnx
 public/imf_simple.onnx
@@ -9,3 +9,6 @@ package-lock.json
 mymodel_quantized_optimized.pt
 model.onnx
 mymodel_optimized.pt
+model-infer.onnx
+public/quantized_imf_encoder_fixed.onnx
+public/quantized_imf_encoder_web.onnx

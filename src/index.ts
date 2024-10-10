@@ -6,25 +6,22 @@ async function main() {
     
     try {
       console.log('Attempting to load model');
-      // await modelLoader.loadModel('/imf_encoder_web.onnx');
-      // await modelLoader.loadModel('/imf_encoder.onnx');
-      await modelLoader.loadModel('/imf_simple.onnx');
-      // await modelLoader.loadModel('/opt-squeeze.onnx');
-      
+
+      const modelLoader = new ONNXModelLoader();
+
+      // Load the model (from file system or URL)
+      await modelLoader.loadModel('/quantized_imf_encoder_fixed.onnx');
       console.log('Model loaded successfully');
-  
-      console.log('Attempting to load frame1.png');
-      const frame1 = await ONNXModelLoader.imageToFloat32Array('/frame1.png');
-      console.log('Frame 1 loaded successfully');
-  
-      console.log('Attempting to load frame2.png');
-      const frame2 = await ONNXModelLoader.imageToFloat32Array('/frame2.png');
-      console.log('Frame 2 loaded successfully');
-  
+      // Prepare input data
+      const xCurrent = await ONNXModelLoader.imageToFloat32Array('path/to/current/image.jpg');
+      const xReference = await ONNXModelLoader.imageToFloat32Array('path/to/reference/image.jpg');
+    
+      // Run inference
       console.log('Running inference');
-      const [fr, tr, tc] = await modelLoader.runInference(frame1, frame2);
+      const [fr, tr, tc] = await modelLoader.runInference(xCurrent, xReference);
       console.log('Inference completed');
-  
+      // Use the outputs as needed
+      console.log('Inference outputs:', fr, tr, tc);
       console.log('Inference results:', { 
         fr: fr.slice(0, 5),
         tr: tr.slice(0, 5), 
@@ -34,6 +31,8 @@ async function main() {
     } catch (error) {
       console.error('Error in main function:', error);
     }
+
+  
   }
   
   main().catch(error => console.error('Unhandled error in main:', error));

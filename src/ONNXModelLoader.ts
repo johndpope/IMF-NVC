@@ -1,7 +1,7 @@
-import init, { Session, Input } from "@webonnx/wonnx-wasm";
+import * as ort from 'onnxruntime-web';
 
 export class ONNXModelLoader {
-  private session: Session | null = null;
+  private session: ort.InferenceSession | null = null;
   private progressBarContainer: HTMLElement;
   private progressBar: HTMLElement;
   private progressText: HTMLElement;
@@ -12,6 +12,7 @@ export class ONNXModelLoader {
     this.progressText = document.createElement('div');
     this.createProgressBar();
   }
+  
 
   private createProgressBar() {
     this.progressBarContainer.style.cssText = `
@@ -49,7 +50,6 @@ export class ONNXModelLoader {
   }
 
   
-
   private showProgressBar() {
     this.progressBarContainer.style.display = 'block';
   }
@@ -68,83 +68,27 @@ export class ONNXModelLoader {
     try {
       this.showProgressBar();
       console.log('Starting model load from:', modelUrl);
-      const modelBytes = await this.fetchBytesWithProgress(modelUrl);
-      console.log('Model data fetched, size:', modelBytes.length);
       
-      await init(); // Initialize WONNX
-      this.session = await this.createSession(modelBytes);
+      // Use onnxruntime-web to create the session
+      this.session = await ort.InferenceSession.create(modelUrl, {
+        executionProviders: ['webgl'],
+        graphOptimizationLevel: 'all'
+      });
+      
       console.log('Model loaded successfully');
     } catch (error) {
       console.error('Error loading the model:', error);
+      
+      if (error instanceof TypeError && error.message.includes('int64 is not supported')) {
+        console.error('The model contains int64 data type which is not supported by the current version of onnxruntime-web.');
+        console.error('Consider quantizing your model to use int32 or float32 instead.');
+        throw new Error('Unsupported model data type: int64. Please use a compatible model.');
+      }
+      
       throw error;
     } finally {
       this.hideProgressBar();
     }
-  }
-
-  private async fetchBytesWithProgress(url: string): Promise<Uint8Array> {
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-    
-    const reader = response.body!.getReader();
-    const contentLength = Number(response.headers.get('Content-Length')) || 0;
-    let receivedLength = 0;
-    let chunks: Uint8Array[] = [];
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      chunks.push(value);
-      receivedLength += value.length;
-      this.updateProgress(receivedLength / contentLength);
-    }
-
-    let chunksAll = new Uint8Array(receivedLength);
-    let position = 0;
-    for (let chunk of chunks) {
-      chunksAll.set(chunk, position);
-      position += chunk.length;
-    }
-    return chunksAll;
-  }
-  private async createSession(modelBytes: Uint8Array): Promise<Session> {
-    const providers = ['webgpu', 'webgl', 'wasm', 'cpu'] as const;
-    for (const provider of providers) {
-        try {
-            console.log(`Attempting to create session with ${provider}`);
-            
-            if (provider === 'webgpu') {
-                if (!this.isWebGPUSupported()) {
-                    console.log('WebGPU is not supported, skipping...');
-                    continue;
-                }
-                console.log('WebGPU is supported, attempting to create adapter...');
-                const gpu = (navigator as any).gpu;
-                if (gpu) {
-                    const adapter = await gpu.requestAdapter();
-                    if (!adapter) {
-                        console.log('Failed to get WebGPU adapter, skipping...');
-                        continue;
-                    }
-                    console.log('WebGPU adapter created successfully');
-                }
-            }
-            
-            const session = await Session.fromBytes(modelBytes);
-            console.log(`Successfully created session with ${provider}`);
-            return session;
-        } catch (error) {
-            console.warn(`Failed to create session with ${provider}:`, error);
-        }
-    }
-    throw new Error("Failed to create session with any available provider");
-  }
-
-  private isWebGPUSupported(): boolean {
-      return !!(navigator as any).gpu;
   }
 
   async runInference(xCurrent: Float32Array, xReference: Float32Array): Promise<[Float32Array, Float32Array, Float32Array]> {
@@ -152,17 +96,16 @@ export class ONNXModelLoader {
       throw new Error('Model not loaded. Call loadModel() first.');
     }
 
-    const input = new Input();
-    input.insert("x_current", xCurrent);
-    input.insert("x_reference", xReference);
+    const feeds: Record<string, ort.Tensor> = {
+      x_current: new ort.Tensor('float32', xCurrent, [1, 3, 256, 256]),
+      x_reference: new ort.Tensor('float32', xReference, [1, 3, 256, 256])
+    };
 
     try {
-      const result = await this.session.run(input);
-      const fr = result.get("f_r") as Float32Array;
-      const tr = result.get("t_r") as Float32Array;
-      const tc = result.get("t_c") as Float32Array;
-
-      input.free(); // Free the input after use
+      const results = await this.session.run(feeds);
+      const fr = results['f_r'].data as Float32Array;
+      const tr = results['t_r'].data as Float32Array;
+      const tc = results['t_c'].data as Float32Array;
 
       return [fr, tr, tc];
     } catch (error) {
@@ -171,7 +114,7 @@ export class ONNXModelLoader {
     }
   }
 
-  // Helper method to convert image to Float32Array (unchanged)
+  // Helper method to convert image to Float32Array
   static async imageToFloat32Array(imageUrl: string): Promise<Float32Array> {
     return new Promise((resolve, reject) => {
       const img = new Image();
