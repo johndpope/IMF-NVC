@@ -12,3 +12,4 @@ mymodel_optimized.pt
 model-infer.onnx
 public/quantized_imf_encoder_fixed.onnx
 public/quantized_imf_encoder_web.onnx
+public/checkpoint.pth
