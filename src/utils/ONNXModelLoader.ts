@@ -1,4 +1,6 @@
 import * as ort from 'onnxruntime-web';
+ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
+
 
 export class ONNXModelLoader {
   private session: ort.InferenceSession | null = null;
@@ -64,6 +66,7 @@ export class ONNXModelLoader {
     this.progressText.textContent = `${percentage}%`;
   }
 
+  
   async loadModel(modelUrl: string): Promise<void> {
     try {
       console.log('Starting model load from:', modelUrl);
@@ -72,10 +75,12 @@ export class ONNXModelLoader {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const arrayBuffer = await response.arrayBuffer();
-      this.session = await ort.InferenceSession.create(arrayBuffer, {
-        executionProviders: ['wasm'],
-        graphOptimizationLevel: 'all'
-      });
+      
+      // Set the WASM path
+      ort.env.wasm.wasmPaths = '/onnxruntime-web/';
+      
+      this.session = await this.createSession(arrayBuffer);
+      
       console.log('Model loaded successfully');
     } catch (error) {
       console.error('Error loading the model:', error);
@@ -83,31 +88,69 @@ export class ONNXModelLoader {
     }
   }
 
+  private async createSession(model: ArrayBuffer): Promise<ort.InferenceSession> {
+    try {
+      // Try WebGL first
+      const session = await ort.InferenceSession.create(model, {
+        executionProviders: ['webgl'],
+        graphOptimizationLevel: 'all'
+      });
+      console.log('Using WebGL backend');
+      return session;
+    } catch (e) {
+      console.warn('WebGL not supported, falling back to WASM', e);
+
+      // WASM optimizations
+      if (typeof ort.env.wasm !== 'undefined') {
+        // Enable multi-threading if possible
+        ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
+        
+        // Use SIMD if available
+        ort.env.wasm.simd = true;
+      }
+      
+      try {
+        // Fallback to WASM
+        const session = await ort.InferenceSession.create(model, {
+          executionProviders: ['wasm'],
+          graphOptimizationLevel: 'all'
+        });
+        console.log('Using WASM backend');
+        return session;
+      } catch (wasmError) {
+        console.error('WASM initialization failed:', wasmError);
+        throw new Error('Failed to initialize both WebGL and WASM backends');
+      }
+    }
+  }
+
   async runInference(xCurrent: Float32Array, xReference: Float32Array): Promise<[Float32Array, Float32Array, Float32Array]> {
     if (!this.session) {
       throw new Error('Model not loaded. Call loadModel() first.');
     }
-
+  
     const feeds: Record<string, ort.Tensor> = {
       x_current: new ort.Tensor('float32', xCurrent, [1, 3, 256, 256]),
       x_reference: new ort.Tensor('float32', xReference, [1, 3, 256, 256])
     };
-
+  
     try {
-      console.log('running Inference ');
+      console.log('Running Inference');
+      const start = performance.now();
       const results = await this.session.run(feeds);
-      console.log('done. ');
+      const end = performance.now();
+      console.log(`Inference took ${end - start} ms`);
+  
       const fr = results['f_r'].data as Float32Array;
       const tr = results['t_r'].data as Float32Array;
       const tc = results['t_c'].data as Float32Array;
-
+  
       return [fr, tr, tc];
     } catch (error) {
       console.error('Error during inference:', error);
       throw error;
     }
   }
-
   // Helper method to convert image to Float32Array
   static async imageToFloat32Array(imageUrl: string): Promise<Float32Array> {
     return new Promise((resolve, reject) => {
