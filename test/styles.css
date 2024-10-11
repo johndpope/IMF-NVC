@@ -1,0 +1,59 @@
+body {
+    font-family: Arial, sans-serif;
+    line-height: 1.6;
+    margin: 0;
+    padding: 20px;
+    background-color: #f4f4f4;
+}
+
+.container {
+    max-width: 800px;
+    margin: 0 auto;
+    background-color: #fff;
+    padding: 20px;
+    border-radius: 5px;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+}
+
+h1 {
+    text-align: center;
+    color: #333;
+}
+
+#videoContainer {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 20px;
+}
+
+#originalVideo, #processedCanvas {
+    width: 48%;
+    border: 1px solid #ddd;
+}
+
+#controls {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+#videoInput, #startProcessing, #effectSelect {
+    padding: 10px;
+    font-size: 16px;
+}
+
+#startProcessing {
+    background-color: #4CAF50;
+    color: white;
+    border: none;
+    cursor: pointer;
+}
+
+#startProcessing:hover {
+    background-color: #45a049;
+}
+
+#startProcessing:disabled {
+    background-color: #cccccc;
+    cursor: not-allowed;
+}

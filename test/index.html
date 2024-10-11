@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebCodecs Video Processor</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <div class="container">
+        <h1>WebCodecs Video Processor</h1>
+        <div id="videoContainer">
+            <video id="originalVideo" controls></video>
+            <canvas id="processedCanvas"></canvas>
+        </div>
+        <div id="controls">
+            <input type="file" id="videoInput" accept="video/*">
+            <button id="startProcessing">Start Processing</button>
+            <select id="effectSelect">
+                <option value="invert">Invert Colors</option>
+                <option value="grayscale">Grayscale</option>
+                <option value="sepia">Sepia</option>
+            </select>
+        </div>
+    </div>
+    <script src="script.js"></script>
+</body>
+</html>
