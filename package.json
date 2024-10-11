@@ -1,42 +1,27 @@
 {
-  "name": "IMF-NVC",
-  "version": "1.0.0",
-  "description": "Proof of Concept for Neural Video Codec using IMF",
-  "main": "dist/index.js",
+  "name": "imf-neural-video-codec",
+  "version": "0.1.0",
+  "private": true,
   "scripts": {
-    "start": "webpack serve --mode development",
-    "build": "webpack --mode production",
-    "dev": "webpack --mode development",
-    "test": "jest"
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
   },
-  "keywords": [
-    "neural",
-    "video",
-    "codec",
-    "IMF"
-  ],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "@aislamov/onnxruntime-web64": "^1.0.6",
-    "@webonnx/wonnx-wasm": "^0.5.1",
-    "fs": "0.0.1-security",
-    "http": "0.0.1-security",
-    "https": "^1.0.0",
-    "onnxruntime-node": "^1.19.2",
+    "next": "14.2.15",
     "onnxruntime-web": "^1.19.2",
-    "sharp": "^0.33.5",
-    "url": "^0.11.4"
+    "react": "^18",
+    "react-dom": "^18"
   },
   "devDependencies": {
-    "@types/jest": "^27.0.3",
-    "@types/node": "^16.11.12",
-    "jest": "^27.4.5",
-    "ts-jest": "^27.1.2",
-    "ts-loader": "^9.2.6",
-    "typescript": "^4.5.4",
-    "webpack": "^5.65.0",
-    "webpack-cli": "^4.9.1",
-    "webpack-dev-server": "^4.7.0"
+    "@types/node": "^20",
+    "@types/react": "^18",
+    "@types/react-dom": "^18",
+    "eslint": "^8",
+    "eslint-config-next": "14.2.15",
+    "postcss": "^8",
+    "tailwindcss": "^3.4.1",
+    "typescript": "^5"
   }
 }

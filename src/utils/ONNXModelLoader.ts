@@ -66,28 +66,20 @@ export class ONNXModelLoader {
 
   async loadModel(modelUrl: string): Promise<void> {
     try {
-      this.showProgressBar();
       console.log('Starting model load from:', modelUrl);
-      
-      // Use onnxruntime-web to create the session
-      this.session = await ort.InferenceSession.create(modelUrl, {
-        executionProviders: ['webgl'],
+      const response = await fetch(modelUrl);
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      this.session = await ort.InferenceSession.create(arrayBuffer, {
+        executionProviders: ['wasm'],
         graphOptimizationLevel: 'all'
       });
-      
       console.log('Model loaded successfully');
     } catch (error) {
       console.error('Error loading the model:', error);
-      
-      if (error instanceof TypeError && error.message.includes('int64 is not supported')) {
-        console.error('The model contains int64 data type which is not supported by the current version of onnxruntime-web.');
-        console.error('Consider quantizing your model to use int32 or float32 instead.');
-        throw new Error('Unsupported model data type: int64. Please use a compatible model.');
-      }
-      
       throw error;
-    } finally {
-      this.hideProgressBar();
     }
   }
 
@@ -102,7 +94,9 @@ export class ONNXModelLoader {
     };
 
     try {
+      console.log('running Inference ');
       const results = await this.session.run(feeds);
+      console.log('done. ');
       const fr = results['f_r'].data as Float32Array;
       const tr = results['t_r'].data as Float32Array;
       const tc = results['t_c'].data as Float32Array;
