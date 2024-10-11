@@ -1,7 +1,6 @@
 import * as ort from 'onnxruntime-web';
 ort.env.wasm.wasmPaths = 'https://cdn.jsdelivr.net/npm/onnxruntime-web/dist/';
 
-
 export class ONNXModelLoader {
   private session: ort.InferenceSession | null = null;
   private progressBarContainer: HTMLElement;
@@ -75,10 +74,10 @@ export class ONNXModelLoader {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const arrayBuffer = await response.arrayBuffer();
-      
-      // Set the WASM path
-      ort.env.wasm.wasmPaths = '/onnxruntime-web/';
-      
+
+
+      console.log('WASM Paths:', ort.env.wasm.wasmPaths);
+
       this.session = await this.createSession(arrayBuffer);
       
       console.log('Model loaded successfully');
@@ -110,16 +109,20 @@ export class ONNXModelLoader {
       }
       
       try {
-        // Fallback to WASM
+        // Configure WASM backend
+        ort.env.wasm.numThreads = navigator.hardwareConcurrency || 4;
+        // ort.env.wasm.simd = true;
+  
+        // Create session with WASM backend
         const session = await ort.InferenceSession.create(model, {
           executionProviders: ['wasm'],
-          graphOptimizationLevel: 'all'
+          graphOptimizationLevel: 'all',
         });
         console.log('Using WASM backend');
         return session;
       } catch (wasmError) {
         console.error('WASM initialization failed:', wasmError);
-        throw new Error('Failed to initialize both WebGL and WASM backends');
+        throw new Error('Failed to initialize the WASM backend');
       }
     }
   }
