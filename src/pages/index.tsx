@@ -1,9 +1,8 @@
-import { useEffect, useState,useRef } from 'react'
-import { ONNXModelLoader } from '../utils/ONNXModelLoader'
+import { useEffect, useState, useRef } from 'react'
+import { TensorFlowModelLoader } from '../utils/TensorFlowModelLoader'
 
 export default function Home() {
   const [inferenceResult, setInferenceResult] = useState<string>('')
-
   const inferenceRun = useRef(false)
 
   useEffect(() => {
@@ -12,18 +11,18 @@ export default function Home() {
       inferenceRun.current = true
 
       try {
-        const modelLoader = new ONNXModelLoader()
-        await modelLoader.loadModel('/imf_encoder.onnx')
+        const modelLoader = new TensorFlowModelLoader()
+        await modelLoader.loadModel('/tfjs_imf_encoder/model.json')
         
-        const xCurrent = await ONNXModelLoader.imageToFloat32Array('/frame1.png')
-        const xReference = await ONNXModelLoader.imageToFloat32Array('/frame2.png')
+        const xCurrent = await TensorFlowModelLoader.imageToTensor('/frame1.png')
+        const xReference = await TensorFlowModelLoader.imageToTensor('/frame2.png')
         
         const [fr, tr, tc] = await modelLoader.runInference(xCurrent, xReference)
         
         setInferenceResult(JSON.stringify({
-          fr: Array.from(fr.slice(0, 5)),
-          tr: Array.from(tr.slice(0, 5)),
-          tc: Array.from(tc.slice(0, 5))
+          fr: Array.from(await fr.data()).slice(0, 5),
+          tr: Array.from(await tr.data()).slice(0, 5),
+          tc: Array.from(await tc.data()).slice(0, 5)
         }, null, 2))
       } catch (error) {
         console.error('Error in inference:', error)

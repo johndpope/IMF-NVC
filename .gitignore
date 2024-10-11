@@ -36,3 +36,5 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 public/imf_encoder.onnx
+public/tfjs_imf_encoder/group1-shard1of1.bin
+public/tfjs_imf_encoder/weights.bin
