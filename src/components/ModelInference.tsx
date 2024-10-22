@@ -131,13 +131,42 @@ const prepareInput = async (
   const img = await loadImage(imagePath);
   
   return tf.tidy(() => {
+    // Convert image to tensor
     const imageTensor = tf.browser.fromPixels(img);
+    
+    // Resize to expected dimensions
     const resized = tf.image.resizeBilinear(imageTensor, [64, 64]);
-    const normalized = resized.div(255.0);
-    const batched = normalized.expandDims(0);
+    
+    // Normalize to [0, 1]
+    const normalized = tf.div(resized, 255.0);
+    
+    // Expand from [64, 64, 3] to [1, 3, 64, 64]
+    const batched = tf.expandDims(normalized, 0);
     const transposed = tf.transpose(batched, [0, 3, 1, 2]);
     
-    return transposed as import('@tensorflow/tfjs').Tensor4D;
+    // Calculate the number of repetitions needed
+    // We want 256 channels total, starting from 3 channels
+    // So we need to create a tensor with enough channels that we can then slice
+    const targetChannels = 256;
+    const inputChannels = 3;
+    const repetitions = Math.ceil(targetChannels / inputChannels);
+    
+    // Create repeated channels
+    const repeatedChannels = [];
+    for (let i = 0; i < repetitions; i++) {
+      repeatedChannels.push(transposed);
+    }
+    
+    // Concatenate along the channel dimension (dim 1)
+    const concatenated = tf.concat(repeatedChannels, 1);
+    
+    // Slice to get exactly 256 channels
+    const final = concatenated.slice([0, 0, 0, 0], [1, targetChannels, 64, 64]);
+    
+    // Log shape for debugging
+    // console.log('Final tensor shape:', final.shape);
+    
+    return final as tf.Tensor4D;
   });
 };
 
