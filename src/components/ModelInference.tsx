@@ -65,52 +65,6 @@ interface InferenceResults {
   timing: TimingMetrics;
 }
 
-const formatTime = (ms: number): string => {
-  if (ms < 1000) return `${ms.toFixed(1)}ms`;
-  return `${(ms/1000).toFixed(2)}s`;
-};
-
-const runInference = async (
-  model: tfjs.GraphModel,
-  inputs: tfjs.Tensor[],
-  tf: typeof tfjs
-): Promise<InferenceResults> => {
-  const inferenceStart = performance.now();
-  
-  const results = tf.tidy(() => {
-    // Log shapes for debugging
-    inputs.forEach((tensor, i) => {
-      console.log(`Input ${i} shape:`, tensor.shape);
-    });
-
-    const inputData = {
-      'args_0:0': inputs[0],
-      'args_0_1:0': inputs[1]
-    };
-
-    const result = model.execute(inputData) as tfjs.Tensor;
-    console.log('Output shape:', result.shape);
-    
-    return {
-      shape: result.shape,
-      data: result.arraySync() as number[][]
-    };
-  });
-  
-  const inferenceTime = performance.now() - inferenceStart;
-  
-  return {
-    ...results,
-    timing: {
-      modelLoading: 0, // This will be set by the main component
-      inputPreparation: 0, // This will be set by the main component
-      inference: inferenceTime,
-      total: 0 // This will be calculated in the main component
-    }
-  };
-};
-
-
 
 const ModelInference = ({ modelPath, imagePaths }: { modelPath: string, imagePaths: string[] }) => {
   const [status, setStatus] = useState<string>('Initializing...');
@@ -160,50 +114,84 @@ const ModelInference = ({ modelPath, imagePaths }: { modelPath: string, imagePat
         const outputTensor = model.execute({
           'args_0:0': inputs[0],
           'args_0_1:0': inputs[1]
-        }) as tf.Tensor;
+        }) as tfjs.Tensor;
 
-        // Convert output tensor to image
-        const processedTensor = tf.tidy(() => {
-          // Assuming output is in range [-0.5, 0.5], normalize to [0, 1]
-          const normalized = tf.add(outputTensor, 0.5);
-          // Convert from NCHW to NHWC format
-          return tf.transpose(normalized, [0, 2, 3, 1]);
+
+         // Convert output tensor to image
+         const processedTensor = tf.tidy(() => {
+          // First ensure we're working with the right shape
+          let tensor = outputTensor;
+          
+          // If tensor is NCHW format, convert to NHWC
+          if (tensor.shape[1] === 3) {
+            tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+          }
+          
+          // Remove batch dimension if present
+          if (tensor.shape[0] === 1) {
+            tensor = tensor.squeeze([0]);
+          }
+          
+          // Normalize values to [0, 1] range
+          const minVal = tensor.min();
+          const maxVal = tensor.max();
+          const normalizedTensor = tensor.sub(minVal).div(maxVal.sub(minVal));
+          
+          // Ensure tensor is float32
+          return normalizedTensor.asType('float32');
         });
 
-        // Convert tensor to canvas
-        const canvas = document.createElement('canvas');
-        canvas.width = 256;
-        canvas.height = 256;
-        await tf.browser.toPixels(processedTensor.squeeze(), canvas);
-        
-        const inferenceTime = performance.now() - inferenceStart;
-        const totalTime = performance.now() - startTime;
-
-        // Set timing metrics
-        setTimingMetrics({
-          modelLoading: modelLoadTime,
-          inputPreparation: inputPrepTime,
-          inference: inferenceTime,
-          total: totalTime
-        });
-
-        // Convert canvas to data URL and set as reconstructed image
-        setReconstructedImage(canvas.toDataURL());
-        setStatus('Inference complete');
-
-        // Cleanup
-        inputs.forEach(tensor => tensor.dispose());
-        outputTensor.dispose();
-        processedTensor.dispose();
-        
-      } catch (err) {
-        const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred';
-        setError(errorMessage);
-        setStatus('Error occurred');
-        console.error('Inference error:', err);
-      } finally {
-        setIsLoading(false);
-      }
+         // Log tensor information for debugging
+         const shape = processedTensor.shape;
+         console.log('Processed tensor shape:', shape);
+         console.log('Processed tensor min:', await processedTensor.min().data());
+         console.log('Processed tensor max:', await processedTensor.max().data());
+ 
+         // Verify tensor shape and create canvas
+         if (shape.length !== 3) {
+           throw new Error(`Expected tensor shape of rank 3, but got rank ${shape.length}`);
+         }
+ 
+         const [height, width] = shape.slice(0, 2) as [number, number];
+         if (!height || !width) {
+           throw new Error('Invalid tensor dimensions');
+         }
+ 
+         const canvas = document.createElement('canvas');
+         canvas.width = width;
+         canvas.height = height;
+ 
+         // Convert to pixels
+         await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+         
+         const inferenceTime = performance.now() - inferenceStart;
+         const totalTime = performance.now() - startTime;
+ 
+         // Set timing metrics
+         setTimingMetrics({
+           modelLoading: modelLoadTime,
+           inputPreparation: inputPrepTime,
+           inference: inferenceTime,
+           total: totalTime
+         });
+ 
+         // Convert canvas to data URL and set as reconstructed image
+         setReconstructedImage(canvas.toDataURL());
+         setStatus('Inference complete');
+ 
+         // Cleanup
+         inputs.forEach(tensor => tensor.dispose());
+         outputTensor.dispose();
+         processedTensor.dispose();
+         
+       } catch (err) {
+         const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred';
+         setError(errorMessage);
+         setStatus('Error occurred');
+         console.error('Inference error:', err);
+       } finally {
+         setIsLoading(false);
+       }
     }
 
     loadAndRunInference();
