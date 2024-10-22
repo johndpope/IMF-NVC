@@ -110,26 +110,18 @@ const runInference = async (
   };
 };
 
-const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
+
+
+const ModelInference = ({ modelPath, imagePaths }: { modelPath: string, imagePaths: string[] }) => {
   const [status, setStatus] = useState<string>('Initializing...');
-  const [results, setResults] = useState<InferenceResults | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [isClient, setIsClient] = useState(false);
-  const [timingMetrics, setTimingMetrics] = useState<TimingMetrics | null>(null);
+  const [timingMetrics, setTimingMetrics] = useState<any>(null);
+  const [reconstructedImage, setReconstructedImage] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
   useEffect(() => {
-    setIsClient(true);
-  }, []);
-
-  useEffect(() => {
-    if (!isClient) return;
-
     async function loadAndRunInference() {
       const startTime = performance.now();
-      let modelLoadTime = 0;
-      let inputPrepTime = 0;
-      let inferenceTime = 0;
-
       try {
         // Import TensorFlow.js
         const tf = await import('@tensorflow/tfjs');
@@ -146,67 +138,89 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
           await tf.ready();
           console.log('Using WebGL backend');
         }
-        
-        // Measure model loading time
+
+        // Load model
         setStatus('Loading model...');
         const modelLoadStart = performance.now();
         const model = await tf.loadGraphModel(modelPath);
-        modelLoadTime = performance.now() - modelLoadStart;
-        
-        // Measure input preparation time
+        const modelLoadTime = performance.now() - modelLoadStart;
+
+        // Prepare inputs
         setStatus('Preparing inputs...');
         const inputPrepStart = performance.now();
         const inputs = await Promise.all([
           prepareInput(imagePaths[0], tf),
           prepareInput(imagePaths[1], tf)
         ]);
-        inputPrepTime = performance.now() - inputPrepStart;
+        const inputPrepTime = performance.now() - inputPrepStart;
 
-        // Run inference and get timing
+        // Run inference
         setStatus('Running inference...');
-        const result = await runInference(model, inputs, tf);
-        inferenceTime = result.timing.inference;
+        const inferenceStart = performance.now();
+        const outputTensor = model.execute({
+          'args_0:0': inputs[0],
+          'args_0_1:0': inputs[1]
+        }) as tf.Tensor;
 
-        // Calculate total time
+        // Convert output tensor to image
+        const processedTensor = tf.tidy(() => {
+          // Assuming output is in range [-0.5, 0.5], normalize to [0, 1]
+          const normalized = tf.add(outputTensor, 0.5);
+          // Convert from NCHW to NHWC format
+          return tf.transpose(normalized, [0, 2, 3, 1]);
+        });
+
+        // Convert tensor to canvas
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        await tf.browser.toPixels(processedTensor.squeeze(), canvas);
+        
+        const inferenceTime = performance.now() - inferenceStart;
         const totalTime = performance.now() - startTime;
 
-        // Update timing metrics
-        const timing: TimingMetrics = {
+        // Set timing metrics
+        setTimingMetrics({
           modelLoading: modelLoadTime,
           inputPreparation: inputPrepTime,
           inference: inferenceTime,
           total: totalTime
-        };
+        });
 
-        setResults({ ...result, timing });
-        setTimingMetrics(timing);
+        // Convert canvas to data URL and set as reconstructed image
+        setReconstructedImage(canvas.toDataURL());
         setStatus('Inference complete');
 
         // Cleanup
         inputs.forEach(tensor => tensor.dispose());
-
+        outputTensor.dispose();
+        processedTensor.dispose();
+        
       } catch (err) {
         const errorMessage = err instanceof Error ? err.message : 'An unknown error occurred';
         setError(errorMessage);
         setStatus('Error occurred');
         console.error('Inference error:', err);
+      } finally {
+        setIsLoading(false);
       }
     }
 
     loadAndRunInference();
-  }, [isClient, modelPath, imagePaths]);
+  }, [modelPath, imagePaths]);
 
-  if (!isClient) {
-    return null;
-  }
+  const formatTime = (ms: number): string => {
+    if (ms < 1000) return `${ms.toFixed(1)}ms`;
+    return `${(ms/1000).toFixed(2)}s`;
+  };
 
   return (
     <Card className="w-full max-w-2xl">
       <CardHeader>
-        <CardTitle>Model Inference</CardTitle>
+        <CardTitle>Neural Video Codec Inference</CardTitle>
       </CardHeader>
       <CardContent>
-        <div className="space-y-4">
+        <div className="space-y-6">
           <div className="text-sm font-medium">Status: {status}</div>
           
           {error && (
@@ -214,6 +228,48 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
               <AlertDescription>{error}</AlertDescription>
             </Alert>
           )}
+
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Reference Frame */}
+            <div className="space-y-2">
+              <div className="font-medium text-sm">Reference Frame</div>
+              <img 
+                src={imagePaths[0]} 
+                alt="Reference frame"
+                className="w-full rounded-lg border border-gray-200"
+              />
+            </div>
+
+            {/* Target Frame */}
+            <div className="space-y-2">
+              <div className="font-medium text-sm">Target Frame</div>
+              <img 
+                src={imagePaths[1]} 
+                alt="Target frame"
+                className="w-full rounded-lg border border-gray-200"
+              />
+            </div>
+
+            {/* Reconstructed Frame */}
+            <div className="space-y-2">
+              <div className="font-medium text-sm">Reconstructed Frame</div>
+              {isLoading ? (
+                <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                  Loading...
+                </div>
+              ) : reconstructedImage ? (
+                <img 
+                  src={reconstructedImage} 
+                  alt="Reconstructed frame"
+                  className="w-full rounded-lg border border-gray-200"
+                />
+              ) : (
+                <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                  No output available
+                </div>
+              )}
+            </div>
+          </div>
           
           {timingMetrics && (
             <div className="rounded-lg bg-slate-100 p-4 space-y-2">
@@ -224,15 +280,6 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
                 <div>Inference: {formatTime(timingMetrics.inference)}</div>
                 <div className="font-medium">Total Time: {formatTime(timingMetrics.total)}</div>
               </div>
-            </div>
-          )}
-          
-          {results && (
-            <div className="rounded-lg bg-gray-50 p-4">
-              <h3 className="font-medium mb-2">Results:</h3>
-              <pre className="text-sm overflow-auto">
-                {JSON.stringify(results.data, null, 2)}
-              </pre>
             </div>
           )}
         </div>
