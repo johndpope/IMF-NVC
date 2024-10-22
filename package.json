@@ -4,29 +4,35 @@
   "private": true,
   "scripts": {
     "dev": "node server.js",
-    // "dev": "next dev  -H 0.0.0.0",
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "postinstall": "mkdir -p public/onnxruntime-web && cp node_modules/onnxruntime-web/dist/*.wasm public/onnxruntime-web/ && echo 'WASM files copied to public/onnxruntime-web/'"
   },
   "dependencies": {
+    "@radix-ui/react-slot": "^1.1.0",
     "@tensorflow/tfjs": "^4.21.0",
+    "@tensorflow/tfjs-backend-webgl": "^4.22.0",
     "@tensorflow/tfjs-backend-webgpu": "^4.21.0",
+    "class-variance-authority": "^0.7.0",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.453.0",
     "next": "14.2.15",
     "onnxruntime-node": "^1.19.2",
     "onnxruntime-web": "^1.19.2",
     "react": "^18",
-    "react-dom": "^18"
+    "react-dom": "^18",
+    "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {
     "@types/node": "^20",
     "@types/react": "^18",
     "@types/react-dom": "^18",
+    "autoprefixer": "^10.4.20",
     "eslint": "^8",
     "eslint-config-next": "14.2.15",
-    "postcss": "^8",
-    "tailwindcss": "^3.4.1",
+    "postcss": "^8.4.47",
+    "tailwindcss": "^3.4.13",
     "typescript": "^5"
   }
 }

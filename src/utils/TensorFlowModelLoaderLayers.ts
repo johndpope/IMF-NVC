@@ -1,7 +1,7 @@
 import * as tf from '@tensorflow/tfjs';
 import '@tensorflow/tfjs-backend-webgpu';
 
-export class TensorFlowModelLoader {
+export class TensorFlowLayerModelLoader {
   private model: tf.LayersModel | null = null;
 
   constructor() {

@@ -14,3 +14,13 @@ pnpm install
 pnpm dev
 
 ```
+
+
+
+## SSL
+```shell
+sudo apt install libnss3-tools wget
+wget https://github.com/FiloSottile/mkcert/releases/download/v1.4.3/mkcert-v1.4.3-linux-amd64
+sudo mv mkcert-v1.4.3-linux-amd64 /usr/local/bin/mkcert
+sudo chmod +x /usr/local/bin/mkcert
+```
