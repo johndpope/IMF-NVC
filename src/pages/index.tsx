@@ -8,7 +8,7 @@ const ModelInference = dynamic(
 )
 
 const Home: NextPage = () => {
-  const modelPath = '/test/model.json' // Place in public folder
+  const modelPath = '/graph_model/model.json' // Place in public folder
   const imagePaths = [
     '/frame1.png',
     '/frame2.png',

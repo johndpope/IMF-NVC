@@ -1,9 +1,10 @@
 'use client';
-// src/components/ModelInference.tsx
+
 import React, { useEffect, useState } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import dynamic from 'next/dynamic';
+import type * as tfjs from '@tensorflow/tfjs';
 
 interface InferenceResults {
   shape: number[];
@@ -15,11 +16,106 @@ interface ModelInferenceProps {
   imagePaths: string[];
 }
 
+const loadImage = async (src: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = (e) => reject(new Error(`Failed to load image: ${src}`));
+    img.src = src;
+  });
+};
+
+const prepareInput = async (
+  imagePath: string,
+  tf: typeof tfjs
+): Promise<tfjs.Tensor4D> => {
+  const img = await loadImage(imagePath);
+  
+  return tf.tidy(() => {
+    // Convert image to tensor
+    const imageTensor = tf.browser.fromPixels(img);
+    
+    // Resize to expected dimensions [256, 256, 3]
+    const resized = tf.image.resizeBilinear(imageTensor, [256, 256]);
+    
+    // Normalize to match PyTorch's normalization
+    const normalized = tf.sub(tf.div(resized, 255.0), 0.5);
+    
+    // Add batch dimension and transpose to NCHW format [1, 3, 256, 256]
+    const batched = tf.expandDims(normalized, 0);
+    const transposed = tf.transpose(batched, [0, 3, 1, 2]);
+    
+    // Log shape for debugging
+    console.log('Final tensor shape:', transposed.shape);
+    
+    return transposed as tfjs.Tensor4D;
+  });
+};
+interface TimingMetrics {
+  modelLoading: number;
+  inputPreparation: number;
+  inference: number;
+  total: number;
+}
+
+interface InferenceResults {
+  shape: number[];
+  data: number[][];
+  timing: TimingMetrics;
+}
+
+const formatTime = (ms: number): string => {
+  if (ms < 1000) return `${ms.toFixed(1)}ms`;
+  return `${(ms/1000).toFixed(2)}s`;
+};
+
+const runInference = async (
+  model: tfjs.GraphModel,
+  inputs: tfjs.Tensor[],
+  tf: typeof tfjs
+): Promise<InferenceResults> => {
+  const inferenceStart = performance.now();
+  
+  const results = tf.tidy(() => {
+    // Log shapes for debugging
+    inputs.forEach((tensor, i) => {
+      console.log(`Input ${i} shape:`, tensor.shape);
+    });
+
+    const inputData = {
+      'args_0:0': inputs[0],
+      'args_0_1:0': inputs[1]
+    };
+
+    const result = model.execute(inputData) as tfjs.Tensor;
+    console.log('Output shape:', result.shape);
+    
+    return {
+      shape: result.shape,
+      data: result.arraySync() as number[][]
+    };
+  });
+  
+  const inferenceTime = performance.now() - inferenceStart;
+  
+  return {
+    ...results,
+    timing: {
+      modelLoading: 0, // This will be set by the main component
+      inputPreparation: 0, // This will be set by the main component
+      inference: inferenceTime,
+      total: 0 // This will be calculated in the main component
+    }
+  };
+};
+
 const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
   const [status, setStatus] = useState<string>('Initializing...');
   const [results, setResults] = useState<InferenceResults | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isClient, setIsClient] = useState(false);
+  const [timingMetrics, setTimingMetrics] = useState<TimingMetrics | null>(null);
 
   useEffect(() => {
     setIsClient(true);
@@ -28,47 +124,65 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
   useEffect(() => {
     if (!isClient) return;
 
-    let tfjs: typeof import('@tensorflow/tfjs');
-    
-    async function initTensorFlow() {
+    async function loadAndRunInference() {
+      const startTime = performance.now();
+      let modelLoadTime = 0;
+      let inputPrepTime = 0;
+      let inferenceTime = 0;
+
       try {
-        tfjs = await import('@tensorflow/tfjs');
+        // Import TensorFlow.js
+        const tf = await import('@tensorflow/tfjs');
         await import('@tensorflow/tfjs-backend-webgpu');
         
+        // Initialize backend
         try {
-          await tfjs.setBackend('webgpu');
-          await tfjs.ready();
+          await tf.setBackend('webgpu');
+          await tf.ready();
           console.log('Using WebGPU backend');
         } catch (error) {
           console.warn('WebGPU not available, falling back to WebGL', error);
-          await tfjs.setBackend('webgl');
-          await tfjs.ready();
+          await tf.setBackend('webgl');
+          await tf.ready();
           console.log('Using WebGL backend');
         }
         
-        return tfjs;
-      } catch (error) {
-        throw new Error('Failed to initialize TensorFlow.js');
-      }
-    }
-
-    async function loadAndRunInference() {
-      try {
-        const tf = await initTensorFlow();
-        
+        // Measure model loading time
         setStatus('Loading model...');
+        const modelLoadStart = performance.now();
         const model = await tf.loadGraphModel(modelPath);
+        modelLoadTime = performance.now() - modelLoadStart;
         
+        // Measure input preparation time
         setStatus('Preparing inputs...');
-        const inputs = await Promise.all(
-          imagePaths.map(path => prepareInput(path, tf))
-        );
+        const inputPrepStart = performance.now();
+        const inputs = await Promise.all([
+          prepareInput(imagePaths[0], tf),
+          prepareInput(imagePaths[1], tf)
+        ]);
+        inputPrepTime = performance.now() - inputPrepStart;
 
+        // Run inference and get timing
         setStatus('Running inference...');
         const result = await runInference(model, inputs, tf);
-        setResults(result);
+        inferenceTime = result.timing.inference;
+
+        // Calculate total time
+        const totalTime = performance.now() - startTime;
+
+        // Update timing metrics
+        const timing: TimingMetrics = {
+          modelLoading: modelLoadTime,
+          inputPreparation: inputPrepTime,
+          inference: inferenceTime,
+          total: totalTime
+        };
+
+        setResults({ ...result, timing });
+        setTimingMetrics(timing);
         setStatus('Inference complete');
 
+        // Cleanup
         inputs.forEach(tensor => tensor.dispose());
 
       } catch (err) {
@@ -101,10 +215,23 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
             </Alert>
           )}
           
+          {timingMetrics && (
+            <div className="rounded-lg bg-slate-100 p-4 space-y-2">
+              <h3 className="font-medium">Performance Metrics:</h3>
+              <div className="text-sm space-y-1">
+                <div>Model Loading: {formatTime(timingMetrics.modelLoading)}</div>
+                <div>Input Preparation: {formatTime(timingMetrics.inputPreparation)}</div>
+                <div>Inference: {formatTime(timingMetrics.inference)}</div>
+                <div className="font-medium">Total Time: {formatTime(timingMetrics.total)}</div>
+              </div>
+            </div>
+          )}
+          
           {results && (
             <div className="rounded-lg bg-gray-50 p-4">
+              <h3 className="font-medium mb-2">Results:</h3>
               <pre className="text-sm overflow-auto">
-                {JSON.stringify(results, null, 2)}
+                {JSON.stringify(results.data, null, 2)}
               </pre>
             </div>
           )}
@@ -112,83 +239,6 @@ const ModelInference = ({ modelPath, imagePaths }: ModelInferenceProps) => {
       </CardContent>
     </Card>
   );
-};
-
-const loadImage = async (src: string): Promise<HTMLImageElement> => {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(img);
-    img.onerror = (e) => reject(new Error(`Failed to load image: ${src}`));
-    img.src = src;
-  });
-};
-
-const prepareInput = async (
-  imagePath: string, 
-  tf: typeof import('@tensorflow/tfjs')
-): Promise<import('@tensorflow/tfjs').Tensor4D> => {
-  const img = await loadImage(imagePath);
-  
-  return tf.tidy(() => {
-    // Convert image to tensor
-    const imageTensor = tf.browser.fromPixels(img);
-    
-    // Resize to expected dimensions
-    const resized = tf.image.resizeBilinear(imageTensor, [64, 64]);
-    
-    // Normalize to [0, 1]
-    const normalized = tf.div(resized, 255.0);
-    
-    // Expand from [64, 64, 3] to [1, 3, 64, 64]
-    const batched = tf.expandDims(normalized, 0);
-    const transposed = tf.transpose(batched, [0, 3, 1, 2]);
-    
-    // Calculate the number of repetitions needed
-    // We want 256 channels total, starting from 3 channels
-    // So we need to create a tensor with enough channels that we can then slice
-    const targetChannels = 256;
-    const inputChannels = 3;
-    const repetitions = Math.ceil(targetChannels / inputChannels);
-    
-    // Create repeated channels
-    const repeatedChannels = [];
-    for (let i = 0; i < repetitions; i++) {
-      repeatedChannels.push(transposed);
-    }
-    
-    // Concatenate along the channel dimension (dim 1)
-    const concatenated = tf.concat(repeatedChannels, 1);
-    
-    // Slice to get exactly 256 channels
-    const final = concatenated.slice([0, 0, 0, 0], [1, targetChannels, 64, 64]);
-    
-    // Log shape for debugging
-    // console.log('Final tensor shape:', final.shape);
-    
-    return final as tf.Tensor4D;
-  });
-};
-
-const runInference = async (
-  model: import('@tensorflow/tfjs').GraphModel,
-  inputs: import('@tensorflow/tfjs').Tensor[],
-  tf: typeof import('@tensorflow/tfjs')
-): Promise<InferenceResults> => {
-  return tf.tidy(() => {
-    const inputData = {
-      'args_0:0': inputs[0],
-      'args_0_1:0': inputs[1],
-      'args_0_2:0': inputs[2]
-    };
-
-    const result = model.execute(inputData) as import('@tensorflow/tfjs').Tensor;
-    
-    return {
-      shape: result.shape,
-      data: result.arraySync() as number[][]
-    };
-  });
 };
 
 export default dynamic(() => Promise.resolve(ModelInference), {

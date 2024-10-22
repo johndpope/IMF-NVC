@@ -44,3 +44,4 @@ public/test/group1-shard3of6.bin
 public/test/group1-shard4of6.bin
 public/test/group1-shard5of6.bin
 public/test/group1-shard6of6.bin
+*.bin
