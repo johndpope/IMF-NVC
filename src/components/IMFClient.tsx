@@ -138,249 +138,384 @@ const IMFClient = () => {
     }
   };
   
-  const fetchFrame = async (videoId: number, frameId: number) => {
-    try {
-      const response = await fetch(`https://192.168.1.108:8000/videos/${videoId}/frames/${frameId}`);
-      const data: VideoFrame = await response.json();
-      return `data:image/png;base64,${data.frame}`;
-    } catch (err) {
-      setError('Failed to fetch frame: ' + err.toString());
-      return null;
+
+
+const processFrames = useCallback(async () => {
+    console.log("🎬 Starting processFrames");
+    console.log(`Selected Video: ${selectedVideo}, Current Frame: ${currentFrame}, Reference Frame: ${referenceFrame}`);
+    
+    if (!selectedVideo) {
+        console.log("❌ No video selected, returning");
+        return;
     }
-  };
-
-  const processFeatures = async (features: FeatureData) => {
-    if (!modelRef.current) {
-      setError('Model not loaded');
-      return;
-    }
-
+    
+    setIsLoading(true);
+    console.log("⏳ Loading state set to true");
+    
     try {
-      setIsLoading(true);
-      const tf = await import('@tensorflow/tfjs');
-      
-      // Convert features to tensors
-      const referenceFeatures = features.reference_features.map(f => 
-        tf.tensor(f)
-      );
-      const referenceToken = tf.tensor(features.reference_token);
-      const currentToken = tf.tensor(features.current_token);
-
-      // Run inference
-      const outputTensor = modelRef.current.execute({
-        'reference_features': referenceFeatures,
-        'reference_token': referenceToken,
-        'current_token': currentToken
-      });
-
-      // Process output tensor
-      const processedTensor = tf.tidy(() => {
-        let tensor = outputTensor;
+        console.log("🔄 Fetching frames...");
+        console.log(`Fetching current frame ${currentFrame} and reference frame ${referenceFrame}`);
         
-        // Handle NCHW to NHWC format if needed
-        if (tensor.shape[1] === 3) {
-          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+        const fetchStartTime = performance.now();
+        const [currentImg, referenceImg] = await Promise.all([
+            fetchFrame(selectedVideo, currentFrame),
+            fetchFrame(selectedVideo, referenceFrame)
+        ]);
+        const fetchEndTime = performance.now();
+        console.log(`✅ Frames fetched in ${(fetchEndTime - fetchStartTime).toFixed(2)}ms`);
+        
+        if (currentImg && referenceImg) {
+            console.log("🖼️ Both frames fetched successfully");
+            console.log("Setting frame images in state");
+            setCurrentFrameImage(currentImg);
+            setReferenceFrameImage(referenceImg);
+            
+            if (wsRef.current) {
+                console.log(`WebSocket state: ${wsRef.current.readyState}`);
+                console.log(`WebSocket states: CONNECTING(${WebSocket.CONNECTING}), OPEN(${WebSocket.OPEN}), CLOSING(${WebSocket.CLOSING}), CLOSED(${WebSocket.CLOSED})`);
+            } else {
+                console.log("❌ WebSocket ref is null");
+            }
+            
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+                const message = {
+                    type: 'process_frames',
+                    video_id: selectedVideo,
+                    current_frame: currentFrame,
+                    reference_frame: referenceFrame
+                };
+                console.log("📤 Sending WebSocket message:", message);
+                
+                wsRef.current.send(JSON.stringify(message));
+                console.log("✅ Message sent successfully");
+            } else {
+                const error = 'WebSocket is not connected';
+                console.error("❌ WebSocket Error:", error);
+                console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
+                setError(error);
+            }
+        } else {
+            console.error("❌ Failed to fetch one or both frames");
+            console.log("Current frame image:", !!currentImg);
+            console.log("Reference frame image:", !!referenceImg);
         }
-        
-        // Remove batch dimension if present
-        if (tensor.shape[0] === 1) {
-          tensor = tensor.squeeze([0]);
-        }
-        
-        // Normalize to [0, 1] range
-        const minVal = tensor.min();
-        const maxVal = tensor.max();
-        const normalizedTensor = tensor.sub(minVal).div(maxVal.sub(minVal));
-        
-        return normalizedTensor.asType('float32');
-      });
-
-      // Convert to image
-      const canvas = document.createElement('canvas');
-      canvas.width = 256;
-      canvas.height = 256;
-      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-      
-      setReconstructedImage(canvas.toDataURL());
-      
-      // Cleanup
-      outputTensor.dispose();
-      processedTensor.dispose();
-      referenceFeatures.forEach(t => t.dispose());
-      referenceToken.dispose();
-      currentToken.dispose();
-      
     } catch (err) {
-      setError('Processing error: ' + err.toString());
+        console.error("❌ Error in processFrames:", err);
+        console.error("Error stack:", err instanceof Error ? err.stack : "No stack trace available");
+        setError('Failed to process frames: ' + err.toString());
     } finally {
-      setIsLoading(false);
+        console.log("⏳ Setting loading state to false");
+        setIsLoading(false);
+    }
+}, [selectedVideo, currentFrame, referenceFrame]);
+
+// Enhanced fetchFrame function with logging
+const fetchFrame = async (videoId: number, frameId: number) => {
+    console.log(`🔄 Fetching frame - Video ID: ${videoId}, Frame ID: ${frameId}`);
+    const startTime = performance.now();
+    
+    try {
+        const url = `https://192.168.1.108:8000/videos/${videoId}/frames/${frameId}`;
+        console.log(`📡 Fetching from URL: ${url}`);
+        
+        const response = await fetch(url);
+        console.log(`Response status: ${response.status}`);
+        
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+        
+        const data: VideoFrame = await response.json();
+        const endTime = performance.now();
+        console.log(`✅ Frame fetched successfully in ${(endTime - startTime).toFixed(2)}ms`);
+        
+        return `data:image/png;base64,${data.frame}`;
+    } catch (err) {
+        console.error(`❌ Error fetching frame ${frameId} for video ${videoId}:`, err);
+        setError('Failed to fetch frame: ' + err.toString());
+        return null;
     }
 };
 
-  const processFrames = useCallback(async () => {
-    if (!selectedVideo) return;
+// Enhanced processFeatures function with logging
+const processFeatures = async (features: FeatureData) => {
+    console.log("🎯 Starting processFeatures");
     
-    setIsLoading(true);
-    try {
-      // Fetch both frames
-      const [currentImg, referenceImg] = await Promise.all([
-        fetchFrame(selectedVideo, currentFrame),
-        fetchFrame(selectedVideo, referenceFrame)
-      ]);
-      
-      if (currentImg && referenceImg) {
-        setCurrentFrameImage(currentImg);
-        setReferenceFrameImage(referenceImg);
-        
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: 'process_frames',
-            video_id: selectedVideo,
-            current_frame: currentFrame,
-            reference_frame: referenceFrame
-          }));
-        } else {
-          setError('WebSocket is not connected');
-        }
-      }
-    } catch (err) {
-      setError('Failed to process frames: ' + err.toString());
-    } finally {
-      setIsLoading(false);
+    if (!modelRef.current) {
+        console.error("❌ Model not loaded");
+        setError('Model not loaded');
+        return;
     }
-  }, [selectedVideo, currentFrame, referenceFrame]);
+
+    try {
+        setIsLoading(true);
+        console.log("⏳ Loading state set to true");
+        
+        const tf = await import('@tensorflow/tfjs');
+        console.log("✅ TensorFlow.js imported");
+        
+        console.log("📊 Converting features to tensors");
+        console.log("Reference features shape:", features.reference_features.map(f => f.length));
+        console.log("Reference token length:", features.reference_token.length);
+        console.log("Current token length:", features.current_token.length);
+        
+        const startTime = performance.now();
+        
+        // Convert features to tensors
+        const referenceFeatures = features.reference_features.map(f => {
+            const tensor = tf.tensor(f);
+            console.log(`Reference feature tensor shape: ${tensor.shape}`);
+            return tensor;
+        });
+        const referenceToken = tf.tensor(features.reference_token);
+        const currentToken = tf.tensor(features.current_token);
+        
+        console.log("✅ Tensors created");
+        console.log("Reference token shape:", referenceToken.shape);
+        console.log("Current token shape:", currentToken.shape);
+
+        // Run inference
+        console.log("🔄 Running model inference");
+        const outputTensor = modelRef.current.execute({
+            'reference_features': referenceFeatures,
+            'reference_token': referenceToken,
+            'current_token': currentToken
+        });
+        
+        console.log("Output tensor shape:", outputTensor.shape);
+
+        // Process output tensor
+        console.log("🔄 Processing output tensor");
+        const processedTensor = tf.tidy(() => {
+            let tensor = outputTensor;
+            console.log("Initial tensor shape:", tensor.shape);
+            
+            if (tensor.shape[1] === 3) {
+                tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+                console.log("After transpose shape:", tensor.shape);
+            }
+            
+            if (tensor.shape[0] === 1) {
+                tensor = tensor.squeeze([0]);
+                console.log("After squeeze shape:", tensor.shape);
+            }
+            
+            // Log tensor stats
+            const stats = tf.tidy(() => ({
+                min: tensor.min().dataSync()[0],
+                max: tensor.max().dataSync()[0],
+                mean: tensor.mean().dataSync()[0]
+            }));
+            console.log("Tensor stats before normalization:", stats);
+            
+            const normalizedTensor = tensor.sub(tensor.min()).div(tensor.max().sub(tensor.min()));
+            return normalizedTensor.asType('float32');
+        });
+
+        const endTime = performance.now();
+        console.log(`✅ Processing completed in ${(endTime - startTime).toFixed(2)}ms`);
+        
+        // Convert to image
+        console.log("🖼️ Converting tensor to image");
+        const canvas = document.createElement('canvas');
+        canvas.width = 256;
+        canvas.height = 256;
+        await tf.browser.toPixels(processedTensor as tf.Tensor3D, canvas);
+        
+        console.log("✅ Setting reconstructed image");
+        setReconstructedImage(canvas.toDataURL());
+        
+        // Cleanup
+        console.log("🧹 Cleaning up tensors");
+        outputTensor.dispose();
+        processedTensor.dispose();
+        referenceFeatures.forEach(t => t.dispose());
+        referenceToken.dispose();
+        currentToken.dispose();
+        
+    } catch (err) {
+        console.error("❌ Error in processFeatures:", err);
+        console.error("Error stack:", err instanceof Error ? err.stack : "No stack trace available");
+        setError('Processing error: ' + err.toString());
+    } finally {
+        console.log("⏳ Setting loading state to false");
+        setIsLoading(false);
+    }
+};
 
     // Update select component to use both isConnected and isModelLoaded
     const isReady = isConnected && isModelLoaded;
+ // Enhanced video selection handler
+ const handleVideoSelect = (value: string) => {
+    console.log("🎬 Video selected:", value);
+    const numericValue = Number(value);
+    console.log("Converted value:", numericValue);
+    
+    const selectedVideoData = videos.find(v => v.id === numericValue);
+    console.log("Selected video data:", selectedVideoData);
+    
+    setSelectedVideo(numericValue);
+    // Reset frame indices when selecting a new video
+    setCurrentFrame(0);
+    setReferenceFrame(0);
+  };
 
-    return (
-      <Card className="w-full max-w-2xl">
-        <CardHeader>
-          <CardTitle>IMF Video Processing</CardTitle>
-        </CardHeader>
-        <CardContent>
-          <div className="space-y-6">
-            <div className="text-sm font-medium">Status: {status}</div>
-            
-            {error && (
-              <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
-              </Alert>
-            )}
-  
-            <div className="space-y-4">
-            <Select 
-                onValueChange={(value) => setSelectedVideo(Number(value))}
+  return (
+    <Card className="w-full max-w-2xl">
+      <CardHeader>
+        <CardTitle>IMF Video Processing</CardTitle>
+      </CardHeader>
+      <CardContent>
+        <div className="space-y-6">
+          <div className="text-sm font-medium">
+            Status: {status}
+            {selectedVideo !== null && ` (Video ${selectedVideo} selected)`}
+          </div>
+          
+          {error && (
+            <Alert variant="destructive">
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="text-sm font-medium">Select Video</label>
+              <Select 
+                onValueChange={handleVideoSelect}
                 disabled={!isReady}
-                >
-                <SelectTrigger className="w-full bg-white dark:bg-gray-800">
-                    <SelectValue placeholder={
+                value={selectedVideo?.toString()}
+              >
+                <SelectTrigger className="w-full bg-background">
+                  <SelectValue placeholder={
                     !isModelLoaded ? "Loading model..." :
                     !isConnected ? "Connecting to server..." :
+                    videos.length === 0 ? "No videos available" :
                     "Select a video"
-                    } />
+                  } />
                 </SelectTrigger>
-                <SelectContent className="bg-white dark:bg-gray-800 border shadow-lg">
-                    {videos.map((video) => (
+                <SelectContent className="bg-background">
+                  {videos.map((video) => (
                     <SelectItem 
-                        key={video.id} 
-                        value={video.id.toString()}
-                        className="hover:bg-gray-100 dark:hover:bg-gray-700"
+                      key={video.id} 
+                      value={video.id.toString()}
                     >
-                        {video.name} ({video.frame_count} frames)
+                      {video.name} ({video.frame_count} frames)
                     </SelectItem>
-                    ))}
+                  ))}
                 </SelectContent>
-                </Select>
+              </Select>
+            </div>
 
             {selectedVideo !== null && (
-              <div className="flex space-x-4">
-                <div className="flex-1">
-                  <label className="text-sm font-medium">Current Frame</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={videos[selectedVideo]?.frame_count - 1}
-                    value={currentFrame}
-                    onChange={(e) => setCurrentFrame(Number(e.target.value))}
-                    className="w-full mt-1 p-2 border rounded"
-                  />
+              <div className="space-y-4">
+                <div className="flex space-x-4">
+                  <div className="flex-1">
+                    <label className="text-sm font-medium">Current Frame</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={videos.find(v => v.id === selectedVideo)?.frame_count - 1 || 0}
+                      value={currentFrame}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        console.log("Setting current frame:", value);
+                        setCurrentFrame(value);
+                      }}
+                      className="w-full mt-1 p-2 border rounded"
+                    />
+                  </div>
+                  <div className="flex-1">
+                    <label className="text-sm font-medium">Reference Frame</label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={videos.find(v => v.id === selectedVideo)?.frame_count - 1 || 0}
+                      value={referenceFrame}
+                      onChange={(e) => {
+                        const value = Number(e.target.value);
+                        console.log("Setting reference frame:", value);
+                        setReferenceFrame(value);
+                      }}
+                      className="w-full mt-1 p-2 border rounded"
+                    />
+                  </div>
                 </div>
-                <div className="flex-1">
-                  <label className="text-sm font-medium">Reference Frame</label>
-                  <input
-                    type="number"
-                    min={0}
-                    max={videos[selectedVideo]?.frame_count - 1}
-                    value={referenceFrame}
-                    onChange={(e) => setReferenceFrame(Number(e.target.value))}
-                    className="w-full mt-1 p-2 border rounded"
-                  />
+
+                <button
+                  className="px-4 py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
+                  onClick={() => {
+                    console.log("Process button clicked");
+                    console.log("Current state:", {
+                      selectedVideo,
+                      currentFrame,
+                      referenceFrame,
+                      isReady,
+                      isLoading
+                    });
+                    processFrames();
+                  }}
+                  disabled={!isReady || isLoading}
+                >
+                  {isLoading ? 'Processing...' : 'Process Frames'}
+                </button>
+
+                {/* Image display grid */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  {/* Reference Frame */}
+                  <div className="space-y-2">
+                    <div className="font-medium text-sm">Reference Frame</div>
+                    {referenceFrameImage ? (
+                      <img 
+                        src={referenceFrameImage} 
+                        alt="Reference frame"
+                        className="w-full rounded-lg border border-gray-200"
+                      />
+                    ) : (
+                      <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                        No reference frame
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Current Frame */}
+                  <div className="space-y-2">
+                    <div className="font-medium text-sm">Current Frame</div>
+                    {currentFrameImage ? (
+                      <img 
+                        src={currentFrameImage} 
+                        alt="Current frame"
+                        className="w-full rounded-lg border border-gray-200"
+                      />
+                    ) : (
+                      <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                        No current frame
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Reconstructed Frame */}
+                  <div className="space-y-2">
+                    <div className="font-medium text-sm">Reconstructed Frame</div>
+                    {isLoading ? (
+                      <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                        Processing...
+                      </div>
+                    ) : reconstructedImage ? (
+                      <img 
+                        src={reconstructedImage} 
+                        alt="Reconstructed frame"
+                        className="w-full rounded-lg border border-gray-200"
+                      />
+                    ) : (
+                      <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
+                        No output available
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             )}
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              {/* Reference Frame */}
-              <div className="space-y-2">
-                <div className="font-medium text-sm">Reference Frame</div>
-                {referenceFrameImage ? (
-                  <img 
-                    src={referenceFrameImage} 
-                    alt="Reference frame"
-                    className="w-full rounded-lg border border-gray-200"
-                  />
-                ) : (
-                  <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
-                    No reference frame
-                  </div>
-                )}
-              </div>
-
-              {/* Current Frame */}
-              <div className="space-y-2">
-                <div className="font-medium text-sm">Current Frame</div>
-                {currentFrameImage ? (
-                  <img 
-                    src={currentFrameImage} 
-                    alt="Current frame"
-                    className="w-full rounded-lg border border-gray-200"
-                  />
-                ) : (
-                  <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
-                    No current frame
-                  </div>
-                )}
-              </div>
-
-              {/* Reconstructed Frame */}
-              <div className="space-y-2">
-                <div className="font-medium text-sm">Reconstructed Frame</div>
-                {isLoading ? (
-                  <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
-                    Processing...
-                  </div>
-                ) : reconstructedImage ? (
-                  <img 
-                    src={reconstructedImage} 
-                    alt="Reconstructed frame"
-                    className="w-full rounded-lg border border-gray-200"
-                  />
-                ) : (
-                  <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
-                    No output available
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <button
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
-              onClick={processFrames}
-              disabled={!isReady || selectedVideo === null || isLoading}
-            >
-              {isLoading ? 'Processing...' : 'Process Frames'}
-            </button>
           </div>
         </div>
       </CardContent>
