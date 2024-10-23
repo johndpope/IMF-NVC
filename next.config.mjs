@@ -3,6 +3,8 @@ const nextConfig = {
   reactStrictMode: true,
   webpack: (config, { isServer }) => {
     if (!isServer) {
+      config.output.workerType = 'module';
+
       config.resolve.fallback = {
         ...config.resolve.fallback,
         fs: false,

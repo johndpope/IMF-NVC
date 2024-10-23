@@ -1,6 +1,7 @@
 import React from 'react';
 import { Play, Pause, SkipBack, SkipForward, Settings } from 'lucide-react';
-import Button from '@/components/ui/button';
+import  Button  from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 interface PlaybackControlsProps {
   isPlaying: boolean;
@@ -12,9 +13,10 @@ interface PlaybackControlsProps {
   showFrameControls?: boolean;
   currentFrame: number;
   totalFrames: number;
+  className?: string;
 }
 
-const PlaybackControls = ({
+const PlaybackControls: React.FC<PlaybackControlsProps> = ({
   isPlaying,
   onPlay,
   onStop,
@@ -23,54 +25,86 @@ const PlaybackControls = ({
   disabled = false,
   showFrameControls = false,
   currentFrame,
-  totalFrames
-}: PlaybackControlsProps) => {
+  totalFrames,
+  className
+}) => {
+  // Format frame count for display
+  const formattedCurrentFrame = (currentFrame + 1).toString().padStart(4, '0');
+  const formattedTotalFrames = totalFrames.toString().padStart(4, '0');
+
   return (
-    <div className="space-y-4">
+    <div className={cn("space-y-4", className)}>
       <div className="flex items-center justify-center space-x-2">
         {showFrameControls && (
           <Button
-            variant="ghost"
-            size="sm"
+            variant="outline"
+            size="icon"
             onClick={onReset}
             disabled={disabled}
-            leftIcon={<SkipBack className="w-4 h-4" />}
+            className="w-9 h-9"
           >
-            Reset
+            <SkipBack className="h-4 w-4" />
           </Button>
         )}
         
         <Button
-          variant={isPlaying ? "destructive" : "primary"}
-          size="md"
+          variant={isPlaying ? "destructive" : "default"}
+          size="default"
           onClick={isPlaying ? onStop : onPlay}
           disabled={disabled}
-          leftIcon={isPlaying ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+          className="min-w-[100px]"
         >
-          {isPlaying ? 'Stop' : 'Play'}
+          {isPlaying ? (
+            <>
+              <Pause className="h-4 w-4 mr-2" />
+              Stop
+            </>
+          ) : (
+            <>
+              <Play className="h-4 w-4 mr-2" />
+              Play
+            </>
+          )}
         </Button>
         
         {showFrameControls && (
           <Button
-            variant="ghost"
-            size="sm"
+            variant="outline"
+            size="icon"
             onClick={onNextFrame}
             disabled={disabled || isPlaying}
-            leftIcon={<SkipForward className="w-4 h-4" />}
+            className="w-9 h-9"
           >
-            Next Frame
+            <SkipForward className="h-4 w-4" />
           </Button>
         )}
       </div>
       
-      <div className="flex items-center justify-between text-sm text-gray-600">
-        <span>Frame: {currentFrame + 1} / {totalFrames}</span>
-        {isPlaying && (
-          <span className="flex items-center">
-            <div className="w-2 h-2 rounded-full bg-green-500 mr-2 animate-pulse" />
-            Processing at 30 FPS
+      <div className="flex items-center justify-between px-1">
+        <div className="flex items-center space-x-2 text-sm text-muted-foreground">
+          <span className="font-mono">
+            {formattedCurrentFrame} / {formattedTotalFrames}
           </span>
+        </div>
+
+        {isPlaying && (
+          <div className="flex items-center space-x-2">
+            <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
+            <span className="text-sm text-muted-foreground">
+              Processing 30 FPS
+            </span>
+          </div>
         )}
+      </div>
+
+      {/* Optional progress bar */}
+      <div className="h-1 bg-secondary rounded-full overflow-hidden">
+        <div 
+          className="h-full bg-primary transition-all duration-300"
+          style={{ 
+            width: `${(currentFrame / (totalFrames - 1)) * 100}%` 
+          }}
+        />
       </div>
     </div>
   );
