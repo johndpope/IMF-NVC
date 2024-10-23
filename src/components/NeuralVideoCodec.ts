@@ -210,7 +210,7 @@ class NeuralVideoCodec {
       };
 
       this.ws.onmessage = this.handleServerMessage.bind(this);
-      this.ws.onerror = (error:any)  => reject(error:any) ;
+      this.ws.onerror = (error:any)  => reject(error) ;
       this.ws.onclose = this.handleDisconnect.bind(this);
     });
   }
@@ -340,7 +340,7 @@ class NeuralVideoCodec {
             .transpose([0, 3, 1, 2]); // Convert to NCHW format
           resolve(tensor as tfjs.Tensor4D);
         } catch (error:any)  {
-          reject(error:any) ;
+          reject(error) ;
         }
       };
       img.onerror = reject;

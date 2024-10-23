@@ -3,7 +3,7 @@ const nextConfig = {
   reactStrictMode: true,
   webpack: (config, { isServer }) => {
     if (!isServer) {
-      config.output.workerType = 'module';
+      // config.output.workerType = 'module';
 
       config.resolve.fallback = {
         ...config.resolve.fallback,
@@ -15,6 +15,7 @@ const nextConfig = {
     // console.log('Webpack config:', JSON.stringify(config, null, 2));
     return config;
   },
+
   async headers() {
     return [
       {

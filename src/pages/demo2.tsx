@@ -3,7 +3,7 @@ import dynamic from 'next/dynamic'
 import IMFClient from '@/components/IMFClient';
 
 
-const Home: NextPage = () => {
+const Demo2: NextPage = () => {
 
 
   return (
@@ -14,4 +14,4 @@ const Home: NextPage = () => {
   )
 }
 
-export default Home
+export default Demo2

@@ -326,7 +326,7 @@ const fetchFrame = async (videoId: number, frameId: number) => {
           const error = "WebSocket is not connected";
           console.error("❌ WebSocket Error:", error);
           console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
-          setError(error:any) ;
+          setError(error) ;
         }
       } else {
         console.error("❌ Failed to fetch one or both frames");
