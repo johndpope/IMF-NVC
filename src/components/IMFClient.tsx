@@ -330,152 +330,150 @@ const IMFClient = () => {
   };
 
   // Enhanced processFeatures function with logging
-  const processFeatures = async (features: FeatureData) => {
-    console.log("🎯 Starting processFeatures");
-    const startTime = performance.now();
-
+ // Enhanced processFeatures function with proper tensor processing and metrics
+ const processFeatures = async (features: FeatureData) => {
+    const timing = {
+      start: performance.now(),
+      tensorPrep: 0,
+      modelExecution: 0,
+      postProcessing: 0,
+      total: 0
+    };
+  
     if (!modelRef.current) {
-      console.error("❌ Model not loaded");
-      setError("Model not loaded");
-      return;
+      throw new Error('Model not loaded');
     }
-
+  
     try {
       setIsLoading(true);
-      const tf = await import("@tensorflow/tfjs");
-
-      // Convert tokens - these keep :0 suffix
+      const tf = await import('@tensorflow/tfjs');
+      
+      // Tensor preparation timing
+      const prepStart = performance.now();
+      
+      // Prepare input tensors
       const currentToken = tf.tensor2d(
-        Array.isArray(features.current_token[0])
-          ? features.current_token
-          : [features.current_token],
+        Array.isArray(features.current_token[0]) 
+          ? features.current_token 
+          : [features.current_token], 
         [1, 32]
-      );
+      ).asType('float32');
+  
       const referenceToken = tf.tensor2d(
-        Array.isArray(features.reference_token[0])
-          ? features.reference_token
-          : [features.reference_token],
+        Array.isArray(features.reference_token[0]) 
+          ? features.reference_token 
+          : [features.reference_token], 
         [1, 32]
-      );
-
-      // Convert reference features with correct shapes
-      const referenceFeatures = features.reference_features.map(
-        (feature, idx) => {
-          let shape;
-          switch (idx) {
-            case 0:
-              shape = [1, 128, 64, 64];
-              break;
-            case 1:
-              shape = [1, 256, 32, 32];
-              break;
-            case 2:
-              shape = [1, 512, 16, 16];
-              break;
-            case 3:
-              shape = [1, 512, 8, 8];
-              break;
-            default:
-              throw new Error(`Unexpected feature index: ${idx}`);
-          }
-          return tf.tensor(feature, shape);
-        }
-      );
-
-      // Log shapes for debugging
-      console.log("Input shapes:", {
-        currentToken: currentToken.shape,
-        referenceToken: referenceToken.shape,
-        referenceFeatures: referenceFeatures.map((t) => t.shape),
+      ).asType('float32');
+  
+      // Convert reference features with explicit shapes
+      const referenceFeatures = features.reference_features.map((feature, idx) => {
+        const shapes = [[1, 128, 64, 64], [1, 256, 32, 32], [1, 512, 16, 16], [1, 512, 8, 8]];
+        return tf.tensor(feature, shapes[idx]).asType('float32');
       });
-
-      // Create inputs object matching exact signature
-      const inputs = {
-        "args_0:0": currentToken,
-        "args_0_1:0": referenceToken,
-        args_0_2: referenceFeatures[0],
-        args_0_3: referenceFeatures[1],
-        args_0_4: referenceFeatures[2],
-        args_0_5: referenceFeatures[3],
-      };
-
-      console.log("Model inputs:", {
-        "args_0:0": inputs["args_0:0"].shape,
-        "args_0_1:0": inputs["args_0_1:0"].shape,
-        args_0_2: inputs["args_0_2"].shape,
-        args_0_3: inputs["args_0_3"].shape,
-        args_0_4: inputs["args_0_4"].shape,
-        args_0_5: inputs["args_0_5"].shape,
+  
+      timing.tensorPrep = performance.now() - prepStart;
+  
+      // Model execution
+      const execStart = performance.now();
+      const outputTensor = modelRef.current.execute({
+        'args_0:0': currentToken,
+        'args_0_1:0': referenceToken,
+        'args_0_2': referenceFeatures[0],
+        'args_0_3': referenceFeatures[1],
+        'args_0_4': referenceFeatures[2],
+        'args_0_5': referenceFeatures[3]
       });
-
-      // Execute model
-      console.log("Executing model...");
-      const outputTensor = modelRef.current.execute(inputs);
-      console.log(
-        "Model execution complete, output shape:",
-        outputTensor.shape
-      );
-
-      // Process output tensor
+      timing.modelExecution = performance.now() - execStart;
+  
+      // Post-processing with shape tracking
+      const postStart = performance.now();
+      
       const processedTensor = tf.tidy(() => {
         let tensor = outputTensor;
-
-        // Convert from NCHW to NHWC if needed
-        if (tensor.shape[1] === 3) {
-          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
-          console.log("After transpose shape:", tensor.shape);
-        }
-
-        // Remove batch dimension if present
-        if (tensor.shape[0] === 1) {
+        console.log('Initial output shape:', tensor.shape);
+  
+        // If we have a rank-4 tensor (NCHW format)
+        if (tensor.shape.length === 4) {
+          // Convert from NCHW to NHWC if needed
+          if (tensor.shape[1] === 3) {
+            tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+            console.log('After NCHW->NHWC transpose:', tensor.shape);
+          }
+          
+          // Remove batch dimension
           tensor = tensor.squeeze([0]);
-          console.log("After squeeze shape:", tensor.shape);
+          console.log('After removing batch dimension:', tensor.shape);
         }
-
-        // Log tensor stats
-        const stats = tf.tidy(() => ({
-          min: tensor.min().dataSync()[0],
-          max: tensor.max().dataSync()[0],
-          mean: tensor.mean().dataSync()[0],
-        }));
-        console.log("Tensor stats before normalization:", stats);
-
-        const normalizedTensor = tensor
-          .sub(tensor.min())
-          .div(tensor.max().sub(tensor.min()));
-        return normalizedTensor.asType("float32");
+  
+        // At this point tensor should be rank 3: [height, width, channels]
+        if (tensor.shape.length !== 3) {
+          throw new Error(`Expected rank 3 tensor after processing, got shape: ${tensor.shape}`);
+        }
+  
+        // Ensure proper RGB channel order if needed
+        if (tensor.shape[2] === 3) {
+          // Optional: swap BGR to RGB if needed
+          // tensor = tf.concat([
+          //   tensor.slice([0, 0, 2], [-1, -1, 1]),
+          //   tensor.slice([0, 0, 1], [-1, -1, 1]),
+          //   tensor.slice([0, 0, 0], [-1, -1, 1])
+          // ], 2);
+        }
+  
+        // Normalize values
+        const min = tensor.min();
+        const max = tensor.max();
+        console.log('Value range:', {
+          min: min.dataSync()[0],
+          max: max.dataSync()[0]
+        });
+        
+        const range = tf.maximum(max.sub(min), tf.scalar(1e-6));
+        let normalizedTensor = tensor.sub(min).div(range);
+  
+        // Ensure output is in correct format for toPixels
+        // Should be [height, width, channels] with values in [0, 1]
+        normalizedTensor = tf.clipByValue(normalizedTensor, 0, 1);
+        
+        console.log('Final tensor shape:', normalizedTensor.shape);
+        return normalizedTensor.asType('float32');
       });
-
-      const endTime = performance.now();
-      console.log(
-        `✅ Processing completed in ${(endTime - startTime).toFixed(2)}ms`
-      );
-
+  
+      timing.postProcessing = performance.now() - postStart;
+      timing.total = performance.now() - timing.start;
+  
+      // Log final tensor shape before conversion
+      console.log('Tensor shape before toPixels:', processedTensor.shape);
+  
       // Convert to image
-      console.log("🖼️ Converting tensor to image");
-      const canvas = document.createElement("canvas");
-      canvas.width = 256;
-      canvas.height = 256;
-      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-
+      const canvas = document.createElement('canvas');
+      canvas.width = processedTensor.shape[1];  // width
+      canvas.height = processedTensor.shape[0]; // height
+      await tf.browser.toPixels(processedTensor, canvas);
+      
+      // Log performance metrics
+      console.log('Performance Metrics:', {
+        tensorPreparation: `${timing.tensorPrep.toFixed(2)}ms`,
+        modelExecution: `${timing.modelExecution.toFixed(2)}ms`,
+        postProcessing: `${timing.postProcessing.toFixed(2)}ms`,
+        total: `${timing.total.toFixed(2)}ms`
+      });
+  
       setReconstructedImage(canvas.toDataURL());
-
+  
       // Cleanup
-      console.log("Cleaning up tensors");
-      [
-        currentToken,
-        referenceToken,
-        ...referenceFeatures,
-        outputTensor,
-        processedTensor,
-      ].forEach((t) => t.dispose());
+      [currentToken, referenceToken, ...referenceFeatures, outputTensor, processedTensor].forEach(t => t.dispose());
+      
+      return timing;
+  
     } catch (err) {
-      console.error("❌ Error in processFeatures:", err);
-      console.error(
-        "Error stack:",
-        err instanceof Error ? err.stack : "No stack trace available"
-      );
-      setError("Processing error: " + err.toString());
+      console.error('Processing error:', err);
+      console.error('Error details:', {
+        message: err.message,
+        stack: err.stack
+      });
+      throw err;
     } finally {
       setIsLoading(false);
     }
