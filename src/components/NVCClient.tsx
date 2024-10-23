@@ -25,11 +25,6 @@ interface VideoFrame {
   frame: string; // base64 encoded image
 }
 
-interface FeatureData {
-  reference_features: number[][][];
-  reference_token: number[];
-  current_token: number[];
-}
 
 interface PlaybackControlsProps {
   isPlaying: boolean;
@@ -147,6 +142,14 @@ useEffect(() => {
           fps: 30,
           modelPath: '/graph_model_client/model.json'
         });
+
+        // Listen for end of video
+        codecRef.current.on('bufferStatus', (status) => {
+          if (status.endReached) {
+            console.log('Video playback complete');
+          }
+        });
+
 
         // Set up event listeners
         codecRef.current.on('frameReady', (data) => {
