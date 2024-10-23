@@ -13,7 +13,7 @@ export class TensorFlowLayerModelLoader {
       await tf.setBackend('webgpu');
       await tf.ready();
       console.log('Using WebGPU backend');
-    } catch (error) {
+    } catch (error:any)  {
       console.warn('WebGPU not available, falling back to WebGL', error);
       await tf.setBackend('webgl');
       await tf.ready();
@@ -48,7 +48,7 @@ export class TensorFlowLayerModelLoader {
       const fixedModelJson = this.fixModelConfig(modelJson);
       this.model = await tf.loadLayersModel(tf.io.fromMemory(fixedModelJson));
       console.log('Model loaded successfully');
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error loading the model:', error);
       throw error;
     }
@@ -64,7 +64,7 @@ export class TensorFlowLayerModelLoader {
       const results = this.model.predict([xCurrent, xReference]) as tf.Tensor;
       console.log('Inference complete');
       return results;
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error during inference:', error);
       throw error;
     }

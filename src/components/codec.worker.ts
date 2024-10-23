@@ -16,7 +16,7 @@ async function initializeModel(modelPath: string) {
     await tf.setBackend('webgpu');
     await tf.ready();
     console.log('Worker: Using WebGPU backend');
-  } catch (error) {
+  } catch (error:any)  {
     console.warn('Worker: WebGPU not available, falling back to WebGL');
     await tf.setBackend('webgl');
     await tf.ready();
@@ -93,7 +93,7 @@ async function processFeatures(features: any) {
     timing.end = performance.now();
     return { imageUrl, timing };
 
-  } catch (error) {
+  } catch (error:any)  {
     throw error;
   }
 }
@@ -111,7 +111,7 @@ self.onmessage = async (event: MessageEvent<WorkerMessage>) => {
         self.postMessage({ type: 'featuresProcessed', payload: result });
         break;
     }
-  } catch (error) {
+  } catch (error:any)  {
     self.postMessage({ type: 'error', payload: error.message });
   }
 };

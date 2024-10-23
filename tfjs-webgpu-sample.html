@@ -74,7 +74,7 @@
                 
                 console.log('Model structure:', model);
                 modelInfoElement.textContent = 'Model structure:\n' + JSON.stringify(model, null, 2);
-            } catch (error) {
+            } catch (error:any)  {
                 statusElement.textContent = 'Error: ' + error.message;
                 console.error('Error:', error);
                 errorLogElement.textContent = 'Error stack:\n' + error.stack;
@@ -138,7 +138,7 @@
                 // Clean up
                 tf.dispose([x_current, x_reference, result]);
 
-            } catch (error) {
+            } catch (error:any)  {
                 statusElement.textContent = 'Error: ' + error.message;
                 console.error('Error:', error);
             }

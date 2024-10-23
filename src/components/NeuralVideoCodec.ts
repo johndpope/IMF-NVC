@@ -127,7 +127,7 @@ class NeuralVideoCodec {
           currentFrame: this.state.currentFrame
         });
   
-      } catch (error) {
+      } catch (error:any)  {
         this.emit('error', {
           message: 'Failed to start playback',
           error: error.toString()
@@ -160,7 +160,7 @@ class NeuralVideoCodec {
         }
       });
 
-    } catch (error) {
+    } catch (error:any)  {
       this.emit('error', {
         message: 'Frame processing failed',
         error: error.toString()
@@ -191,7 +191,7 @@ class NeuralVideoCodec {
         });
         return frameData;
       }
-    } catch (error) {
+    } catch (error:any)  {
       console.error(`Failed to fetch frame ${frameIndex}:`, error);
     }
 
@@ -210,7 +210,7 @@ class NeuralVideoCodec {
       };
 
       this.ws.onmessage = this.handleServerMessage.bind(this);
-      this.ws.onerror = (error) => reject(error);
+      this.ws.onerror = (error:any)  => reject(error:any) ;
       this.ws.onclose = this.handleDisconnect.bind(this);
     });
   }
@@ -284,7 +284,7 @@ class NeuralVideoCodec {
         await tf.setBackend('webgpu');
         await tf.ready();
         console.log('Using WebGPU backend');
-      } catch (error) {
+      } catch (error:any)  {
         console.warn('WebGPU not available, falling back to WebGL');
         await tf.setBackend('webgl');
         await tf.ready();
@@ -292,7 +292,7 @@ class NeuralVideoCodec {
 
       this.model = await tf.loadGraphModel(modelPath);
       console.log('Model loaded successfully');
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error loading model:', error);
       throw error;
     }
@@ -322,7 +322,7 @@ class NeuralVideoCodec {
       
       return processedImageData;
 
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error in neural processing:', error);
       throw error;
     }
@@ -339,8 +339,8 @@ class NeuralVideoCodec {
             .expandDims(0)
             .transpose([0, 3, 1, 2]); // Convert to NCHW format
           resolve(tensor as tfjs.Tensor4D);
-        } catch (error) {
-          reject(error);
+        } catch (error:any)  {
+          reject(error:any) ;
         }
       };
       img.onerror = reject;
@@ -447,7 +447,7 @@ class NeuralVideoCodec {
     if (this.ws?.readyState === WebSocket.CLOSED) {
       try {
         await this.connect(this.ws.url);
-      } catch (error) {
+      } catch (error:any)  {
         console.error('Reconnection failed:', error);
         setTimeout(() => this.reconnect(), 5000);
       }
@@ -506,7 +506,7 @@ class NeuralVideoCodec {
       this.metrics.networkLatency = performance.now() - startTime;
       
       return data.frame; // base64 encoded image data
-    } catch (error) {
+    } catch (error:any)  {
       this.handleError({
         message: `Failed to fetch frame ${frameIndex}`,
         error: error.toString()
@@ -552,7 +552,7 @@ class NeuralVideoCodec {
         
         // Update metrics
         this.updateMetrics();
-      } catch (error) {
+      } catch (error:any)  {
         console.error('Playback error:', error);
         this.metrics.droppedFrames++;
       }
@@ -591,7 +591,7 @@ class NeuralVideoCodec {
         this.processingQueue.shift();
         this.state.currentFrame++;
 
-      } catch (error) {
+      } catch (error:any)  {
         console.error('Frame processing error:', error);
         this.metrics.droppedFrames++;
         this.processingQueue.shift(); // Skip problematic frame

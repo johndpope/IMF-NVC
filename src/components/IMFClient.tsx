@@ -104,7 +104,7 @@ const IMFClient = () => {
         setTimeout(connect, 3000);
       };
 
-      ws.onerror = (error) => {
+      ws.onerror = (error:any)  => {
         console.error("WebSocket error:", error);
         setError("WebSocket error: " + error.toString());
       };
@@ -135,7 +135,7 @@ const IMFClient = () => {
           await tf.setBackend("webgpu");
           await tf.ready();
           console.log("Using WebGPU backend");
-        } catch (error) {
+        } catch (error:any)  {
           console.warn("WebGPU not available, falling back to WebGL");
           await tf.setBackend("webgl");
           await tf.ready();
@@ -256,7 +256,7 @@ const IMFClient = () => {
           const error = "WebSocket is not connected";
           console.error("❌ WebSocket Error:", error);
           console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
-          setError(error);
+          setError(error:any) ;
         }
       } else {
         console.error("❌ Failed to fetch one or both frames");
@@ -538,7 +538,7 @@ const IMFClient = () => {
 
           frameQueueRef.current.shift();
           lastFrameTimeRef.current = timestamp;
-        } catch (error) {
+        } catch (error:any)  {
           console.error("Error processing frame:", error);
           stopPlayback();
           return;

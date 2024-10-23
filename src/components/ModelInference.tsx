@@ -86,7 +86,7 @@ const ModelInference = ({ modelPath, imagePaths }: { modelPath: string, imagePat
           await tf.setBackend('webgpu');
           await tf.ready();
           console.log('Using WebGPU backend');
-        } catch (error) {
+        } catch (error:any)  {
           console.warn('WebGPU not available, falling back to WebGL', error);
           await tf.setBackend('webgl');
           await tf.ready();

@@ -81,7 +81,7 @@ export class ONNXModelLoader {
       this.session = await this.createSession(arrayBuffer);
       
       console.log('Model loaded successfully');
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error loading the model:', error);
       throw error;
     }
@@ -149,7 +149,7 @@ export class ONNXModelLoader {
       const tc = results['t_c'].data as Float32Array;
   
       return [fr, tr, tc];
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Error during inference:', error);
       throw error;
     }

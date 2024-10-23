@@ -115,7 +115,7 @@ useEffect(() => {
       setIsLoading(false);
     });
 
-    codecRef.current.on('error', (error) => {
+    codecRef.current.on('error', (error:any)  => {
       setError(error.message);
       setIsLoading(false);
     });
@@ -154,7 +154,7 @@ useEffect(() => {
           setIsLoading(false);
         });
 
-        codecRef.current.on('error', (error) => {
+        codecRef.current.on('error', (error:any)  => {
           setError(error.message);
           setIsLoading(false);
         });
@@ -178,7 +178,7 @@ useEffect(() => {
         setShowProgress(false);
         setStatus('Connected and ready');
 
-      } catch (err) {
+      } catch (err:any) {
         console.error('Initialization error:', err);
         setError('Failed to initialize: ' + err.toString());
         setShowProgress(false);
@@ -204,7 +204,7 @@ useEffect(() => {
         setVideos(data.videos);
         setIsModelLoaded(true); // Set model loaded state after successful initialization
         setIsConnected(true); // Set connected state
-      } catch (err) {
+      } catch (err:any) {
         setError("Failed to fetch videos list: " + err.toString());
       }
     }
@@ -239,7 +239,7 @@ const handleVideoSelect = async (value: string) => {
         setReferenceFrameImage(referenceImg);
       }
     }
-  } catch (error) {
+  } catch (error:any) {
     console.error("Error selecting video:", error);
     setError("Failed to select video: " + error.toString());
   } finally {
@@ -259,7 +259,7 @@ const fetchFrame = async (videoId: number, frameId: number) => {
 
     const data: VideoFrame = await response.json();
     return `data:image/png;base64,${data.frame}`;
-  } catch (err) {
+  } catch (err:any) {
     console.error(`Error fetching frame ${frameId} for video ${videoId}:`, err);
     setError("Failed to fetch frame: " + err.toString());
     return null;
@@ -326,7 +326,7 @@ const fetchFrame = async (videoId: number, frameId: number) => {
           const error = "WebSocket is not connected";
           console.error("❌ WebSocket Error:", error);
           console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
-          setError(error);
+          setError(error:any) ;
         }
       } else {
         console.error("❌ Failed to fetch one or both frames");
@@ -360,7 +360,7 @@ const startPlayback = useCallback(async () => {
     // Update UI state
     setPlaybackStartFrame(currentFrame);
     
-  } catch (error) {
+  } catch (error:any)  {
     console.error('Playback error:', error);
     setError('Failed to start playback: ' + error.toString());
     setIsPlaying(false);
@@ -375,7 +375,7 @@ const stopPlayback = useCallback(() => {
   try {
     codecRef.current.pause();
     setIsPlaying(false);
-  } catch (error) {
+  } catch (error:any)  {
     console.error('Stop playback error:', error);
     setError('Failed to stop playback: ' + error.toString());
   }
@@ -408,7 +408,7 @@ const stopPlayback = useCallback(() => {
       // Reset frames
       setCurrentFrameImage(null);
       setReconstructedImage(null);
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Reset error:', error);
       setError('Failed to reset: ' + error.toString());
     }
@@ -436,7 +436,7 @@ const stopPlayback = useCallback(() => {
       if (currentImg) setCurrentFrameImage(currentImg);
       if (referenceImg) setReferenceFrameImage(referenceImg);
       
-    } catch (error) {
+    } catch (error:any)  {
       console.error('Next frame error:', error);
       setError('Failed to process next frame: ' + error.toString());
     } finally {
@@ -504,7 +504,7 @@ const DebugPanel = () => (
 
   return (
     <Card className="w-full max-w-2xl">
-      <DebugPanel/>
+      {/* <DebugPanel/> */}
       <ProgressBar
         progress={progress}
         message={progressMessage}
