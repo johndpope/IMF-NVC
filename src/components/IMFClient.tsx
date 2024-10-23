@@ -1,48 +1,79 @@
-import React, { useEffect, useState, useRef,useCallback } from 'react';
+
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
-import type * as tfjs from '@tensorflow/tfjs';
-interface FeatureData {
-  reference_features: number[][][];
-  reference_token: number[];
-  current_token: number[];
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+
+interface Video {
+  id: number;
+  name: string;
+  frame_count: number;
+}
+
+interface VideoFrame {
+  frame: string;  // base64 encoded image
 }
 
 const IMFClient = () => {
   const [status, setStatus] = useState<string>('Initializing...');
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
+  const [videos, setVideos] = useState<Video[]>([]);
+  const [selectedVideo, setSelectedVideo] = useState<number | null>(null);
   const [currentFrame, setCurrentFrame] = useState<number>(0);
-  const [totalFrames, setTotalFrames] = useState<number>(0);
+  const [referenceFrame, setReferenceFrame] = useState<number>(0);
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const modelRef = useRef<any>(null);
-  const [reconstructedImage, setReconstructedImage] = useState<string | null>(null);
-  const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
-  const reconnectAttemptsRef = useRef(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
-  const RECONNECT_DELAY = 3000;
+
+  // Fetch available videos
+  useEffect(() => {
+    const fetchVideos = async () => {
+      try {
+        const response = await fetch('https://192.168.1.108:8000/videos');
+        const data = await response.json();
+        setVideos(data.videos);
+      } catch (err) {
+        setError('Failed to fetch videos list: ' + err.toString());
+      }
+    };
+    fetchVideos();
+  }, []);
+
+  const fetchFrame = async (videoId: number, frameId: number) => {
+    try {
+      const response = await fetch(`https://192.168.1.108:8000/videos/${videoId}/frames/${frameId}`);
+      const data: VideoFrame = await response.json();
+      return `data:image/png;base64,${data.frame}`;
+    } catch (err) {
+      setError('Failed to fetch frame: ' + err.toString());
+      return null;
+    }
+  };
+
   const connect = useCallback(() => {
     try {
-      console.log('Attempting to connect to WebSocket...');
+      console.log('Connecting to WebSocket...');
       setStatus('Connecting...');
       
       const ws = new WebSocket('wss://192.168.1.108:8000/ws');
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected successfully');
+        console.log('WebSocket connected');
         setIsConnected(true);
-        setStatus('Connected to server');
+        setStatus('Connected');
         setError(null);
-        reconnectAttemptsRef.current = 0;
       };
 
       ws.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
           console.log('Received message:', data);
+          
           if (data.type === 'frame_features') {
             await processFeatures(data.features);
+          } else if (data.type === 'error') {
+            setError(data.message);
           }
         } catch (err) {
           console.error('Error processing message:', err);
@@ -50,21 +81,10 @@ const IMFClient = () => {
         }
       };
 
-      ws.onclose = (event) => {
-        console.log('WebSocket closed:', event);
+      ws.onclose = () => {
+        console.log('WebSocket disconnected');
         setIsConnected(false);
-        setStatus('Disconnected from server');
-        
-        // Attempt to reconnect if not intentionally closed
-        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
-          console.log(`Attempting to reconnect... (${reconnectAttemptsRef.current + 1}/${MAX_RECONNECT_ATTEMPTS})`);
-          reconnectTimeoutRef.current = setTimeout(() => {
-            reconnectAttemptsRef.current += 1;
-            connect();
-          }, RECONNECT_DELAY);
-        } else {
-          setError('Maximum reconnection attempts reached. Please refresh the page.');
-        }
+        setStatus('Disconnected');
       };
 
       ws.onerror = (error) => {
@@ -74,82 +94,35 @@ const IMFClient = () => {
 
     } catch (err) {
       console.error('Failed to connect:', err);
-      setError('Failed to connect to server: ' + err.toString());
+      setError('Failed to connect: ' + err.toString());
     }
   }, []);
 
   useEffect(() => {
     connect();
-
-    return () => {
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
-      }
-      if (wsRef.current) {
-        wsRef.current.close();
-      }
-    };
+    return () => wsRef.current?.close();
   }, [connect]);
 
-  const processFeatures = async (features: FeatureData) => {
-    if (!modelRef.current) {
-      setError('Model not loaded');
-      return;
-    }
-
-    try {
-      const tf = await import('@tensorflow/tfjs');
-      
-      // Convert features to tensors
-      const referenceFeatures = features.reference_features.map(f => 
-        tf.tensor(f)
-      );
-      const referenceToken = tf.tensor(features.reference_token);
-      const currentToken = tf.tensor(features.current_token);
-
-      // Run inference
-      const outputTensor = modelRef.current.execute({
-        'reference_features': referenceFeatures,
-        'reference_token': referenceToken,
-        'current_token': currentToken
-      });
-
-      // Process output tensor
-      const processedTensor = tf.tidy(() => {
-        // Normalize to [0, 1] range
-        const normalized = tf.add(outputTensor, 0.5);
-        return tf.clipByValue(normalized, 0, 1);
-      });
-
-      // Convert to image
-      const canvas = document.createElement('canvas');
-      canvas.width = 256;
-      canvas.height = 256;
-      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-      
-      setReconstructedImage(canvas.toDataURL());
-      
-      // Cleanup
-      outputTensor.dispose();
-      processedTensor.dispose();
-      referenceFeatures.forEach(t => t.dispose());
-      referenceToken.dispose();
-      currentToken.dispose();
-      
-    } catch (err) {
-      setError('Processing error: ' + err.toString());
-    }
-  };
-
-  const requestNextFrame = () => {
-    if (wsRef.current && isConnected) {
+  const processFrames = useCallback(async () => {
+    if (!selectedVideo) return;
+    
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
-        type: 'request_frame',
-        frame_index: currentFrame,
-        reference_frame_index: 0
+        type: 'process_frames',
+        video_id: selectedVideo,
+        current_frame: currentFrame,
+        reference_frame: referenceFrame
       }));
+      
+      // Update preview
+      const frameImage = await fetchFrame(selectedVideo, currentFrame);
+      if (frameImage) {
+        setPreviewImage(frameImage);
+      }
+    } else {
+      setError('WebSocket is not connected');
     }
-  };
+  }, [selectedVideo, currentFrame, referenceFrame]);
 
   return (
     <Card className="w-full max-w-2xl">
@@ -167,23 +140,66 @@ const IMFClient = () => {
           )}
 
           <div className="space-y-4">
-            {reconstructedImage && (
+            <Select 
+              onValueChange={(value) => setSelectedVideo(Number(value))}
+              disabled={!isConnected}
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select a video" />
+              </SelectTrigger>
+              <SelectContent>
+                {videos.map((video) => (
+                  <SelectItem key={video.id} value={video.id.toString()}>
+                    {video.name} ({video.frame_count} frames)
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+
+            {selectedVideo !== null && (
+              <div className="flex space-x-4">
+                <div className="flex-1">
+                  <label className="text-sm font-medium">Current Frame</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={videos[selectedVideo]?.frame_count - 1}
+                    value={currentFrame}
+                    onChange={(e) => setCurrentFrame(Number(e.target.value))}
+                    className="w-full mt-1 p-2 border rounded"
+                  />
+                </div>
+                <div className="flex-1">
+                  <label className="text-sm font-medium">Reference Frame</label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={videos[selectedVideo]?.frame_count - 1}
+                    value={referenceFrame}
+                    onChange={(e) => setReferenceFrame(Number(e.target.value))}
+                    className="w-full mt-1 p-2 border rounded"
+                  />
+                </div>
+              </div>
+            )}
+
+            {previewImage && (
               <div className="space-y-2">
-                <div className="font-medium">Reconstructed Frame</div>
+                <div className="font-medium text-sm">Current Frame Preview</div>
                 <img 
-                  src={reconstructedImage} 
-                  alt="Reconstructed frame"
+                  src={previewImage}
+                  alt="Frame preview"
                   className="w-full rounded-lg border border-gray-200"
                 />
               </div>
             )}
 
             <button
-              className="px-4 py-2 bg-blue-500 text-white rounded-lg"
-              onClick={requestNextFrame}
-              disabled={!isConnected}
+              className="px-4 py-2 bg-blue-500 text-white rounded-lg disabled:opacity-50"
+              onClick={processFrames}
+              disabled={!isConnected || selectedVideo === null}
             >
-              Next Frame
+              Process Frames
             </button>
           </div>
         </div>
