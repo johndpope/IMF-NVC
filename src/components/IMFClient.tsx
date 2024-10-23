@@ -1,9 +1,17 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
-import { Alert, AlertDescription } from '@/components/ui/alert';
-import ProgressBar from '@/components/ui/progressbar'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import type * as tfjs from '@tensorflow/tfjs';
+import React, { useEffect, useState, useRef, useCallback } from "react";
+import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import ProgressBar from "@/components/ui/progressbar";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import  PlaybackControls  from '@/components/ui/playback-controls';
+import { Play, Pause, Square } from 'lucide-react';
+import type * as tfjs from "@tensorflow/tfjs";
 
 interface Video {
   id: number;
@@ -12,17 +20,17 @@ interface Video {
 }
 
 interface VideoFrame {
-  frame: string;  // base64 encoded image
+  frame: string; // base64 encoded image
 }
 
 interface FeatureData {
-    reference_features: number[][][];
-    reference_token: number[];
-    current_token: number[];
+  reference_features: number[][][];
+  reference_token: number[];
+  current_token: number[];
 }
 
 const IMFClient = () => {
-  const [status, setStatus] = useState<string>('Initializing...');
+  const [status, setStatus] = useState<string>("Initializing...");
   const [error, setError] = useState<string | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -32,126 +40,142 @@ const IMFClient = () => {
   const [selectedVideo, setSelectedVideo] = useState<number | null>(null);
   const [currentFrame, setCurrentFrame] = useState<number>(0);
   const [referenceFrame, setReferenceFrame] = useState<number>(0);
-  const [currentFrameImage, setCurrentFrameImage] = useState<string | null>(null);
-  const [referenceFrameImage, setReferenceFrameImage] = useState<string | null>(null);
-  const [reconstructedImage, setReconstructedImage] = useState<string | null>(null);
+  const [currentFrameImage, setCurrentFrameImage] = useState<string | null>(
+    null
+  );
+  const [referenceFrameImage, setReferenceFrameImage] = useState<string | null>(
+    null
+  );
+  const [reconstructedImage, setReconstructedImage] = useState<string | null>(
+    null
+  );
   const wsRef = useRef<WebSocket | null>(null);
   const modelRef = useRef<any>(null);
   const [progress, setProgress] = useState<number>(0);
-  const [progressMessage, setProgressMessage] = useState<string>('');
+  const [progressMessage, setProgressMessage] = useState<string>("");
   const [showProgress, setShowProgress] = useState<boolean>(false);
 
+  // Add new state variables for playback
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackStartFrame, setPlaybackStartFrame] = useState(0);
+  const playbackRef = useRef<number | null>(null);
+  const lastFrameTimeRef = useRef<number>(0);
+  const frameQueueRef = useRef<Array<{ current: number; reference: number }>>(
+    []
+  );
+  const processingRef = useRef(false);
 
-   // Initialize WebSocket connection
-   const connect = useCallback(() => {
+  // Initialize WebSocket connection
+  const connect = useCallback(() => {
     try {
-      console.log('Connecting to WebSocket...');
-      setStatus('Connecting to server...');
-      
-      const ws = new WebSocket('wss://192.168.1.108:8000/ws');
+      console.log("Connecting to WebSocket...");
+      setStatus("Connecting to server...");
+
+      const ws = new WebSocket("wss://192.168.1.108:8000/ws");
       wsRef.current = ws;
 
       ws.onopen = () => {
-        console.log('WebSocket connected');
+        console.log("WebSocket connected");
         setIsConnected(true);
-        setStatus(isModelLoaded ? 'Ready' : 'Loading model...');
+        setStatus(isModelLoaded ? "Ready" : "Loading model...");
       };
 
       ws.onmessage = async (event) => {
         try {
           const data = JSON.parse(event.data);
-          console.log('Received message:', data);
-          
-          if (data.type === 'frame_features') {
+          console.log("Received message:", data);
+
+          if (data.type === "frame_features") {
             await processFeatures(data.features);
-          } else if (data.type === 'error') {
+          } else if (data.type === "error") {
             setError(data.message);
           }
         } catch (err) {
-          console.error('Error processing message:', err);
-          setError('Error processing message: ' + err.toString());
+          console.error("Error processing message:", err);
+          setError("Error processing message: " + err.toString());
         }
       };
 
       ws.onclose = () => {
-        console.log('WebSocket disconnected');
+        console.log("WebSocket disconnected");
         setIsConnected(false);
-        setStatus('Disconnected from server');
+        setStatus("Disconnected from server");
         // Attempt to reconnect after a delay
         setTimeout(connect, 3000);
       };
 
       ws.onerror = (error) => {
-        console.error('WebSocket error:', error);
-        setError('WebSocket error: ' + error.toString());
+        console.error("WebSocket error:", error);
+        setError("WebSocket error: " + error.toString());
       };
-
     } catch (err) {
-      console.error('Failed to connect:', err);
-      setError('Failed to connect: ' + err.toString());
+      console.error("Failed to connect:", err);
+      setError("Failed to connect: " + err.toString());
       // Attempt to reconnect after a delay
       setTimeout(connect, 3000);
     }
   }, [isModelLoaded]);
 
   // Load TensorFlow.js and model
-// Modify the model loading function
-useEffect(() => {
-  async function initializeModel() {
-    try {
-      setShowProgress(true);
-      setProgressMessage('Initializing TensorFlow.js...');
-      setProgress(0.1);
-
-      const tf = await import('@tensorflow/tfjs');
-      await import('@tensorflow/tfjs-backend-webgpu');
-      
-      setProgress(0.2);
-      setProgressMessage('Setting up backend...');
-      
+  // Modify the model loading function
+  useEffect(() => {
+    async function initializeModel() {
       try {
-        await tf.setBackend('webgpu');
-        await tf.ready();
-        console.log('Using WebGPU backend');
-      } catch (error) {
-        console.warn('WebGPU not available, falling back to WebGL');
-        await tf.setBackend('webgl');
-        await tf.ready();
-      }
+        setShowProgress(true);
+        setProgressMessage("Initializing TensorFlow.js...");
+        setProgress(0.1);
 
-      setProgress(0.4);
-      setProgressMessage('Loading model...');
-      
-      const model = await tf.loadGraphModel('/graph_model_client/model.json', {
-        onProgress: (fraction) => {
-          // Update progress from 40% to 90%
-          setProgress(0.4 + (fraction * 0.5));
+        const tf = await import("@tensorflow/tfjs");
+        await import("@tensorflow/tfjs-backend-webgpu");
+
+        setProgress(0.2);
+        setProgressMessage("Setting up backend...");
+
+        try {
+          await tf.setBackend("webgpu");
+          await tf.ready();
+          console.log("Using WebGPU backend");
+        } catch (error) {
+          console.warn("WebGPU not available, falling back to WebGL");
+          await tf.setBackend("webgl");
+          await tf.ready();
         }
-      });
 
-      setProgress(0.9);
-      setProgressMessage('Initializing model...');
-      
-      await inspectModel(model);
-      modelRef.current = model;
-      setIsModelLoaded(true);
-      
-      setProgress(1);
-      setProgressMessage('Model ready');
-      
-      // Hide progress bar after a short delay
-      setTimeout(() => {
+        setProgress(0.4);
+        setProgressMessage("Loading model...");
+
+        const model = await tf.loadGraphModel(
+          "/graph_model_client/model.json",
+          {
+            onProgress: (fraction) => {
+              // Update progress from 40% to 90%
+              setProgress(0.4 + fraction * 0.5);
+            },
+          }
+        );
+
+        setProgress(0.9);
+        setProgressMessage("Initializing model...");
+
+        await inspectModel(model);
+        modelRef.current = model;
+        setIsModelLoaded(true);
+
+        setProgress(1);
+        setProgressMessage("Model ready");
+
+        // Hide progress bar after a short delay
+        setTimeout(() => {
+          setShowProgress(false);
+          setStatus(isConnected ? "Ready" : "Connecting to server...");
+        }, 500);
+      } catch (err) {
+        setError("Failed to initialize model: " + err.toString());
         setShowProgress(false);
-        setStatus(isConnected ? 'Ready' : 'Connecting to server...');
-      }, 500);
-
-    } catch (err) {
-      setError('Failed to initialize model: ' + err.toString());
-      setShowProgress(false);
+      }
     }
-  }
-  initializeModel();
-}, []);
+    initializeModel();
+  }, []);
 
   // Connect WebSocket and fetch videos after model is loaded
   useEffect(() => {
@@ -164,288 +188,411 @@ useEffect(() => {
   // Fetch available videos
   const fetchVideos = async () => {
     try {
-      const response = await fetch('https://192.168.1.108:8000/videos');
+      const response = await fetch("https://192.168.1.108:8000/videos");
       const data = await response.json();
       setVideos(data.videos);
     } catch (err) {
-      setError('Failed to fetch videos list: ' + err.toString());
+      setError("Failed to fetch videos list: " + err.toString());
     }
   };
-  
 
-
-const processFrames = useCallback(async () => {
+  const processFrames = useCallback(async () => {
     console.log("🎬 Starting processFrames");
-    console.log(`Selected Video: ${selectedVideo}, Current Frame: ${currentFrame}, Reference Frame: ${referenceFrame}`);
-    
+    console.log(
+      `Selected Video: ${selectedVideo}, Current Frame: ${currentFrame}, Reference Frame: ${referenceFrame}`
+    );
+
     if (!selectedVideo) {
-        console.log("❌ No video selected, returning");
-        return;
+      console.log("❌ No video selected, returning");
+      return;
     }
-    
+
     setIsLoading(true);
     console.log("⏳ Loading state set to true");
-    
+
     try {
-        console.log("🔄 Fetching frames...");
-        console.log(`Fetching current frame ${currentFrame} and reference frame ${referenceFrame}`);
-        
-        const fetchStartTime = performance.now();
-        const [currentImg, referenceImg] = await Promise.all([
-            fetchFrame(selectedVideo, currentFrame),
-            fetchFrame(selectedVideo, referenceFrame)
-        ]);
-        const fetchEndTime = performance.now();
-        console.log(`✅ Frames fetched in ${(fetchEndTime - fetchStartTime).toFixed(2)}ms`);
-        
-        if (currentImg && referenceImg) {
-            console.log("🖼️ Both frames fetched successfully");
-            console.log("Setting frame images in state");
-            setCurrentFrameImage(currentImg);
-            setReferenceFrameImage(referenceImg);
-            
-            if (wsRef.current) {
-                console.log(`WebSocket state: ${wsRef.current.readyState}`);
-                console.log(`WebSocket states: CONNECTING(${WebSocket.CONNECTING}), OPEN(${WebSocket.OPEN}), CLOSING(${WebSocket.CLOSING}), CLOSED(${WebSocket.CLOSED})`);
-            } else {
-                console.log("❌ WebSocket ref is null");
-            }
-            
-            if (wsRef.current?.readyState === WebSocket.OPEN) {
-                const message = {
-                    type: 'process_frames',
-                    video_id: selectedVideo,
-                    current_frame: currentFrame,
-                    reference_frame: referenceFrame
-                };
-                console.log("📤 Sending WebSocket message:", message);
-                
-                wsRef.current.send(JSON.stringify(message));
-                console.log("✅ Message sent successfully");
-            } else {
-                const error = 'WebSocket is not connected';
-                console.error("❌ WebSocket Error:", error);
-                console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
-                setError(error);
-            }
+      console.log("🔄 Fetching frames...");
+      console.log(
+        `Fetching current frame ${currentFrame} and reference frame ${referenceFrame}`
+      );
+
+      const fetchStartTime = performance.now();
+      const [currentImg, referenceImg] = await Promise.all([
+        fetchFrame(selectedVideo, currentFrame),
+        fetchFrame(selectedVideo, referenceFrame),
+      ]);
+      const fetchEndTime = performance.now();
+      console.log(
+        `✅ Frames fetched in ${(fetchEndTime - fetchStartTime).toFixed(2)}ms`
+      );
+
+      if (currentImg && referenceImg) {
+        console.log("🖼️ Both frames fetched successfully");
+        console.log("Setting frame images in state");
+        setCurrentFrameImage(currentImg);
+        setReferenceFrameImage(referenceImg);
+
+        if (wsRef.current) {
+          console.log(`WebSocket state: ${wsRef.current.readyState}`);
+          console.log(
+            `WebSocket states: CONNECTING(${WebSocket.CONNECTING}), OPEN(${WebSocket.OPEN}), CLOSING(${WebSocket.CLOSING}), CLOSED(${WebSocket.CLOSED})`
+          );
         } else {
-            console.error("❌ Failed to fetch one or both frames");
-            console.log("Current frame image:", !!currentImg);
-            console.log("Reference frame image:", !!referenceImg);
+          console.log("❌ WebSocket ref is null");
         }
+
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          const message = {
+            type: "process_frames",
+            video_id: selectedVideo,
+            current_frame: currentFrame,
+            reference_frame: referenceFrame,
+          };
+          console.log("📤 Sending WebSocket message:", message);
+
+          wsRef.current.send(JSON.stringify(message));
+          console.log("✅ Message sent successfully");
+        } else {
+          const error = "WebSocket is not connected";
+          console.error("❌ WebSocket Error:", error);
+          console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
+          setError(error);
+        }
+      } else {
+        console.error("❌ Failed to fetch one or both frames");
+        console.log("Current frame image:", !!currentImg);
+        console.log("Reference frame image:", !!referenceImg);
+      }
     } catch (err) {
-        console.error("❌ Error in processFrames:", err);
-        console.error("Error stack:", err instanceof Error ? err.stack : "No stack trace available");
-        setError('Failed to process frames: ' + err.toString());
+      console.error("❌ Error in processFrames:", err);
+      console.error(
+        "Error stack:",
+        err instanceof Error ? err.stack : "No stack trace available"
+      );
+      setError("Failed to process frames: " + err.toString());
     } finally {
-        console.log("⏳ Setting loading state to false");
-        setIsLoading(false);
+      console.log("⏳ Setting loading state to false");
+      setIsLoading(false);
     }
-}, [selectedVideo, currentFrame, referenceFrame]);
+  }, [selectedVideo, currentFrame, referenceFrame]);
 
-// Enhanced fetchFrame function with logging
-const fetchFrame = async (videoId: number, frameId: number) => {
-    console.log(`🔄 Fetching frame - Video ID: ${videoId}, Frame ID: ${frameId}`);
+  // Enhanced fetchFrame function with logging
+  const fetchFrame = async (videoId: number, frameId: number) => {
+    console.log(
+      `🔄 Fetching frame - Video ID: ${videoId}, Frame ID: ${frameId}`
+    );
     const startTime = performance.now();
-    
-    try {
-        const url = `https://192.168.1.108:8000/videos/${videoId}/frames/${frameId}`;
-        console.log(`📡 Fetching from URL: ${url}`);
-        
-        const response = await fetch(url);
-        console.log(`Response status: ${response.status}`);
-        
-        if (!response.ok) {
-            throw new Error(`HTTP error! status: ${response.status}`);
-        }
-        
-        const data: VideoFrame = await response.json();
-        const endTime = performance.now();
-        console.log(`✅ Frame fetched successfully in ${(endTime - startTime).toFixed(2)}ms`);
-        
-        return `data:image/png;base64,${data.frame}`;
-    } catch (err) {
-        console.error(`❌ Error fetching frame ${frameId} for video ${videoId}:`, err);
-        setError('Failed to fetch frame: ' + err.toString());
-        return null;
-    }
-};
 
-// Helper function to inspect model signature
-const inspectModel = async (model: tfjs.GraphModel) => {
+    try {
+      const url = `https://192.168.1.108:8000/videos/${videoId}/frames/${frameId}`;
+      console.log(`📡 Fetching from URL: ${url}`);
+
+      const response = await fetch(url);
+      console.log(`Response status: ${response.status}`);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const data: VideoFrame = await response.json();
+      const endTime = performance.now();
+      console.log(
+        `✅ Frame fetched successfully in ${(endTime - startTime).toFixed(2)}ms`
+      );
+
+      return `data:image/png;base64,${data.frame}`;
+    } catch (err) {
+      console.error(
+        `❌ Error fetching frame ${frameId} for video ${videoId}:`,
+        err
+      );
+      setError("Failed to fetch frame: " + err.toString());
+      return null;
+    }
+  };
+
+  // Helper function to inspect model signature
+  const inspectModel = async (model: tfjs.GraphModel) => {
     console.log("🔍 Model Signature:");
     if (model.modelSignature) {
-        console.log("Inputs:", model.modelSignature.inputs);
-        console.log("Outputs:", model.modelSignature.outputs);
+      console.log("Inputs:", model.modelSignature.inputs);
+      console.log("Outputs:", model.modelSignature.outputs);
     }
-    
+
     console.log("🔍 Model Inputs:");
     model.inputs.forEach((input, idx) => {
-        console.log(`Input ${idx}:`, {
-            name: input.name,
-            shape: input.shape,
-            dtype: input.dtype
-        });
+      console.log(`Input ${idx}:`, {
+        name: input.name,
+        shape: input.shape,
+        dtype: input.dtype,
+      });
     });
-};
+  };
 
-// Enhanced processFeatures function with logging
-const processFeatures = async (features: FeatureData) => {
+  // Enhanced processFeatures function with logging
+  const processFeatures = async (features: FeatureData) => {
     console.log("🎯 Starting processFeatures");
     const startTime = performance.now();
-    
+
     if (!modelRef.current) {
-        console.error("❌ Model not loaded");
-        setError('Model not loaded');
-        return;
+      console.error("❌ Model not loaded");
+      setError("Model not loaded");
+      return;
     }
 
     try {
-        setIsLoading(true);
-        const tf = await import('@tensorflow/tfjs');
-        
-        // Convert tokens - these keep :0 suffix
-        const currentToken = tf.tensor2d(
-            Array.isArray(features.current_token[0]) 
-                ? features.current_token 
-                : [features.current_token], 
-            [1, 32]
-        );
-        const referenceToken = tf.tensor2d(
-            Array.isArray(features.reference_token[0]) 
-                ? features.reference_token 
-                : [features.reference_token], 
-            [1, 32]
-        );
+      setIsLoading(true);
+      const tf = await import("@tensorflow/tfjs");
 
-        // Convert reference features with correct shapes
-        const referenceFeatures = features.reference_features.map((feature, idx) => {
-            let shape;
-            switch(idx) {
-                case 0: shape = [1, 128, 64, 64]; break;
-                case 1: shape = [1, 256, 32, 32]; break;
-                case 2: shape = [1, 512, 16, 16]; break;
-                case 3: shape = [1, 512, 8, 8]; break;
-                default: throw new Error(`Unexpected feature index: ${idx}`);
-            }
-            return tf.tensor(feature, shape);
-        });
+      // Convert tokens - these keep :0 suffix
+      const currentToken = tf.tensor2d(
+        Array.isArray(features.current_token[0])
+          ? features.current_token
+          : [features.current_token],
+        [1, 32]
+      );
+      const referenceToken = tf.tensor2d(
+        Array.isArray(features.reference_token[0])
+          ? features.reference_token
+          : [features.reference_token],
+        [1, 32]
+      );
 
-        // Log shapes for debugging
-        console.log("Input shapes:", {
-            currentToken: currentToken.shape,
-            referenceToken: referenceToken.shape,
-            referenceFeatures: referenceFeatures.map(t => t.shape)
-        });
+      // Convert reference features with correct shapes
+      const referenceFeatures = features.reference_features.map(
+        (feature, idx) => {
+          let shape;
+          switch (idx) {
+            case 0:
+              shape = [1, 128, 64, 64];
+              break;
+            case 1:
+              shape = [1, 256, 32, 32];
+              break;
+            case 2:
+              shape = [1, 512, 16, 16];
+              break;
+            case 3:
+              shape = [1, 512, 8, 8];
+              break;
+            default:
+              throw new Error(`Unexpected feature index: ${idx}`);
+          }
+          return tf.tensor(feature, shape);
+        }
+      );
 
-        // Create inputs object matching exact signature
-        const inputs = {
-            'args_0:0': currentToken,
-            'args_0_1:0': referenceToken,
-            'args_0_2': referenceFeatures[0],
-            'args_0_3': referenceFeatures[1],
-            'args_0_4': referenceFeatures[2],
-            'args_0_5': referenceFeatures[3]
-        };
+      // Log shapes for debugging
+      console.log("Input shapes:", {
+        currentToken: currentToken.shape,
+        referenceToken: referenceToken.shape,
+        referenceFeatures: referenceFeatures.map((t) => t.shape),
+      });
 
-        console.log("Model inputs:", {
-            'args_0:0': inputs['args_0:0'].shape,
-            'args_0_1:0': inputs['args_0_1:0'].shape,
-            'args_0_2': inputs['args_0_2'].shape,
-            'args_0_3': inputs['args_0_3'].shape,
-            'args_0_4': inputs['args_0_4'].shape,
-            'args_0_5': inputs['args_0_5'].shape,
-        });
+      // Create inputs object matching exact signature
+      const inputs = {
+        "args_0:0": currentToken,
+        "args_0_1:0": referenceToken,
+        args_0_2: referenceFeatures[0],
+        args_0_3: referenceFeatures[1],
+        args_0_4: referenceFeatures[2],
+        args_0_5: referenceFeatures[3],
+      };
 
-        // Execute model
-        console.log("Executing model...");
-        const outputTensor = modelRef.current.execute(inputs);
-        console.log("Model execution complete, output shape:", outputTensor.shape);
+      console.log("Model inputs:", {
+        "args_0:0": inputs["args_0:0"].shape,
+        "args_0_1:0": inputs["args_0_1:0"].shape,
+        args_0_2: inputs["args_0_2"].shape,
+        args_0_3: inputs["args_0_3"].shape,
+        args_0_4: inputs["args_0_4"].shape,
+        args_0_5: inputs["args_0_5"].shape,
+      });
 
-        // Process output tensor
-        const processedTensor = tf.tidy(() => {
-            let tensor = outputTensor;
-            
-            // Convert from NCHW to NHWC if needed
-            if (tensor.shape[1] === 3) {
-                tensor = tf.transpose(tensor, [0, 2, 3, 1]);
-                console.log("After transpose shape:", tensor.shape);
-            }
-            
-            // Remove batch dimension if present
-            if (tensor.shape[0] === 1) {
-                tensor = tensor.squeeze([0]);
-                console.log("After squeeze shape:", tensor.shape);
-            }
-            
-            // Log tensor stats
-            const stats = tf.tidy(() => ({
-                min: tensor.min().dataSync()[0],
-                max: tensor.max().dataSync()[0],
-                mean: tensor.mean().dataSync()[0]
-            }));
-            console.log("Tensor stats before normalization:", stats);
-            
-            const normalizedTensor = tensor.sub(tensor.min()).div(tensor.max().sub(tensor.min()));
-            return normalizedTensor.asType('float32');
-        });
+      // Execute model
+      console.log("Executing model...");
+      const outputTensor = modelRef.current.execute(inputs);
+      console.log(
+        "Model execution complete, output shape:",
+        outputTensor.shape
+      );
 
-        const endTime = performance.now();
-        console.log(`✅ Processing completed in ${(endTime - startTime).toFixed(2)}ms`);
-        
-        // Convert to image
-        console.log("🖼️ Converting tensor to image");
-        const canvas = document.createElement('canvas');
-        canvas.width = 256;
-        canvas.height = 256;
-        await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-        
-        setReconstructedImage(canvas.toDataURL());
-        
-        // Cleanup
-        console.log("Cleaning up tensors");
-        [
-            currentToken, 
-            referenceToken, 
-            ...referenceFeatures,
-            outputTensor, 
-            processedTensor
-        ].forEach(t => t.dispose());
-        
+      // Process output tensor
+      const processedTensor = tf.tidy(() => {
+        let tensor = outputTensor;
+
+        // Convert from NCHW to NHWC if needed
+        if (tensor.shape[1] === 3) {
+          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+          console.log("After transpose shape:", tensor.shape);
+        }
+
+        // Remove batch dimension if present
+        if (tensor.shape[0] === 1) {
+          tensor = tensor.squeeze([0]);
+          console.log("After squeeze shape:", tensor.shape);
+        }
+
+        // Log tensor stats
+        const stats = tf.tidy(() => ({
+          min: tensor.min().dataSync()[0],
+          max: tensor.max().dataSync()[0],
+          mean: tensor.mean().dataSync()[0],
+        }));
+        console.log("Tensor stats before normalization:", stats);
+
+        const normalizedTensor = tensor
+          .sub(tensor.min())
+          .div(tensor.max().sub(tensor.min()));
+        return normalizedTensor.asType("float32");
+      });
+
+      const endTime = performance.now();
+      console.log(
+        `✅ Processing completed in ${(endTime - startTime).toFixed(2)}ms`
+      );
+
+      // Convert to image
+      console.log("🖼️ Converting tensor to image");
+      const canvas = document.createElement("canvas");
+      canvas.width = 256;
+      canvas.height = 256;
+      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+
+      setReconstructedImage(canvas.toDataURL());
+
+      // Cleanup
+      console.log("Cleaning up tensors");
+      [
+        currentToken,
+        referenceToken,
+        ...referenceFeatures,
+        outputTensor,
+        processedTensor,
+      ].forEach((t) => t.dispose());
     } catch (err) {
-        console.error("❌ Error in processFeatures:", err);
-        console.error("Error stack:", err instanceof Error ? err.stack : "No stack trace available");
-        setError('Processing error: ' + err.toString());
+      console.error("❌ Error in processFeatures:", err);
+      console.error(
+        "Error stack:",
+        err instanceof Error ? err.stack : "No stack trace available"
+      );
+      setError("Processing error: " + err.toString());
     } finally {
-        setIsLoading(false);
+      setIsLoading(false);
     }
-};
+  };
 
+  // Function to start playback
+  const startPlayback = useCallback(() => {
+    if (!selectedVideo) return;
 
-    // Update select component to use both isConnected and isModelLoaded
-    const isReady = isConnected && isModelLoaded;
- // Enhanced video selection handler
- const handleVideoSelect = (value: string) => {
+    const video = videos.find((v) => v.id === selectedVideo);
+    if (!video) return;
+
+    setIsPlaying(true);
+    setPlaybackStartFrame(currentFrame);
+    lastFrameTimeRef.current = performance.now();
+
+    // Initialize frame queue
+    frameQueueRef.current = [];
+    const totalFrames = Math.min(
+      video.frame_count - currentFrame,
+      300 // Limit to 10 seconds at 30fps
+    );
+
+    for (let i = 0; i < totalFrames; i++) {
+      frameQueueRef.current.push({
+        current: currentFrame + i,
+        reference: referenceFrame,
+      });
+    }
+
+    requestAnimationFrame(processNextFrame);
+  }, [selectedVideo, currentFrame, referenceFrame, videos]);
+  // Function to stop playback
+  const stopPlayback = useCallback(() => {
+    setIsPlaying(false);
+    if (playbackRef.current) {
+      cancelAnimationFrame(playbackRef.current);
+      playbackRef.current = null;
+    }
+    frameQueueRef.current = [];
+    processingRef.current = false;
+  }, []);
+
+  // Process next frame in queue
+  const processNextFrame = useCallback(
+    async (timestamp: number) => {
+      if (!isPlaying || frameQueueRef.current.length === 0) {
+        stopPlayback();
+        return;
+      }
+
+      const frameTime = 1000 / 30; // 33.33ms for 30fps
+      const timeSinceLastFrame = timestamp - lastFrameTimeRef.current;
+
+      if (timeSinceLastFrame >= frameTime && !processingRef.current) {
+        processingRef.current = true;
+        const nextFrames = frameQueueRef.current[0];
+
+        try {
+          setCurrentFrame(nextFrames.current);
+          await processFrames();
+
+          frameQueueRef.current.shift();
+          lastFrameTimeRef.current = timestamp;
+        } catch (error) {
+          console.error("Error processing frame:", error);
+          stopPlayback();
+          return;
+        } finally {
+          processingRef.current = false;
+        }
+      }
+
+      playbackRef.current = requestAnimationFrame(processNextFrame);
+    },
+    [isPlaying, processFrames, stopPlayback]
+  );
+
+  // Update select component to use both isConnected and isModelLoaded
+  const isReady = isConnected && isModelLoaded;
+  // Enhanced video selection handler
+  const handleVideoSelect = (value: string) => {
     console.log("🎬 Video selected:", value);
     const numericValue = Number(value);
     console.log("Converted value:", numericValue);
-    
-    const selectedVideoData = videos.find(v => v.id === numericValue);
+
+    const selectedVideoData = videos.find((v) => v.id === numericValue);
     console.log("Selected video data:", selectedVideoData);
-    
+
     setSelectedVideo(numericValue);
     // Reset frame indices when selecting a new video
     setCurrentFrame(0);
     setReferenceFrame(0);
   };
 
+  const handleReset = useCallback(() => {
+    setCurrentFrame(playbackStartFrame);
+    stopPlayback();
+  }, [playbackStartFrame, stopPlayback]);
+  
+  const handleNextFrame = useCallback(() => {
+    if (selectedVideo) {
+      const video = videos.find(v => v.id === selectedVideo);
+      if (video && currentFrame < video.frame_count - 1) {
+        setCurrentFrame(prev => prev + 1);
+        processFrames();
+      }
+    }
+  }, [selectedVideo, videos, currentFrame, processFrames]);
+
   return (
     <Card className="w-full max-w-2xl">
-           <ProgressBar 
-      progress={progress}
-      message={progressMessage}
-      isVisible={showProgress}
-    />
+      <ProgressBar
+        progress={progress}
+        message={progressMessage}
+        isVisible={showProgress}
+      />
       <CardHeader>
         <CardTitle>IMF Video Processing</CardTitle>
       </CardHeader>
@@ -455,7 +602,7 @@ const processFeatures = async (features: FeatureData) => {
             Status: {status}
             {selectedVideo !== null && ` (Video ${selectedVideo} selected)`}
           </div>
-          
+
           {error && (
             <Alert variant="destructive">
               <AlertDescription>{error}</AlertDescription>
@@ -465,25 +612,27 @@ const processFeatures = async (features: FeatureData) => {
           <div className="space-y-4">
             <div className="space-y-2">
               <label className="text-sm font-medium">Select Video</label>
-              <Select 
+              <Select
                 onValueChange={handleVideoSelect}
                 disabled={!isReady}
                 value={selectedVideo?.toString()}
               >
                 <SelectTrigger className="w-full bg-background">
-                  <SelectValue placeholder={
-                    !isModelLoaded ? "Loading model..." :
-                    !isConnected ? "Connecting to server..." :
-                    videos.length === 0 ? "No videos available" :
-                    "Select a video"
-                  } />
+                  <SelectValue
+                    placeholder={
+                      !isModelLoaded
+                        ? "Loading model..."
+                        : !isConnected
+                        ? "Connecting to server..."
+                        : videos.length === 0
+                        ? "No videos available"
+                        : "Select a video"
+                    }
+                  />
                 </SelectTrigger>
                 <SelectContent className="bg-background">
                   {videos.map((video) => (
-                    <SelectItem 
-                      key={video.id} 
-                      value={video.id.toString()}
-                    >
+                    <SelectItem key={video.id} value={video.id.toString()}>
                       {video.name} ({video.frame_count} frames)
                     </SelectItem>
                   ))}
@@ -493,13 +642,38 @@ const processFeatures = async (features: FeatureData) => {
 
             {selectedVideo !== null && (
               <div className="space-y-4">
+
+<PlaybackControls
+      isPlaying={isPlaying}
+      onPlay={startPlayback}
+      onStop={stopPlayback}
+      onReset={handleReset}
+      onNextFrame={handleNextFrame}
+      disabled={!isReady || isLoading}
+      showFrameControls={true}
+      currentFrame={currentFrame}
+      totalFrames={videos.find(v => v.id === selectedVideo)?.frame_count || 0}
+    />
+                 {/* Add playback controls */}
+              <div className="flex space-x-4 items-center">
+              
+                {isPlaying && (
+                  <div className="text-sm">
+                    Processing frame {currentFrame} 
+                    ({frameQueueRef.current.length} frames remaining)
+                  </div>
+                )}
+              </div>
                 <div className="flex space-x-4">
                   <div className="flex-1">
                     <label className="text-sm font-medium">Current Frame</label>
                     <input
                       type="number"
                       min={0}
-                      max={videos.find(v => v.id === selectedVideo)?.frame_count - 1 || 0}
+                      max={
+                        videos.find((v) => v.id === selectedVideo)
+                          ?.frame_count - 1 || 0
+                      }
                       value={currentFrame}
                       onChange={(e) => {
                         const value = Number(e.target.value);
@@ -510,11 +684,16 @@ const processFeatures = async (features: FeatureData) => {
                     />
                   </div>
                   <div className="flex-1">
-                    <label className="text-sm font-medium">Reference Frame</label>
+                    <label className="text-sm font-medium">
+                      Reference Frame
+                    </label>
                     <input
                       type="number"
                       min={0}
-                      max={videos.find(v => v.id === selectedVideo)?.frame_count - 1 || 0}
+                      max={
+                        videos.find((v) => v.id === selectedVideo)
+                          ?.frame_count - 1 || 0
+                      }
                       value={referenceFrame}
                       onChange={(e) => {
                         const value = Number(e.target.value);
@@ -535,13 +714,13 @@ const processFeatures = async (features: FeatureData) => {
                       currentFrame,
                       referenceFrame,
                       isReady,
-                      isLoading
+                      isLoading,
                     });
                     processFrames();
                   }}
                   disabled={!isReady || isLoading}
                 >
-                  {isLoading ? 'Processing...' : 'Process Frames'}
+                  {isLoading ? "Processing..." : "Process Frames"}
                 </button>
 
                 {/* Image display grid */}
@@ -550,8 +729,8 @@ const processFeatures = async (features: FeatureData) => {
                   <div className="space-y-2">
                     <div className="font-medium text-sm">Reference Frame</div>
                     {referenceFrameImage ? (
-                      <img 
-                        src={referenceFrameImage} 
+                      <img
+                        src={referenceFrameImage}
                         alt="Reference frame"
                         className="w-full rounded-lg border border-gray-200"
                       />
@@ -566,8 +745,8 @@ const processFeatures = async (features: FeatureData) => {
                   <div className="space-y-2">
                     <div className="font-medium text-sm">Current Frame</div>
                     {currentFrameImage ? (
-                      <img 
-                        src={currentFrameImage} 
+                      <img
+                        src={currentFrameImage}
                         alt="Current frame"
                         className="w-full rounded-lg border border-gray-200"
                       />
@@ -580,14 +759,16 @@ const processFeatures = async (features: FeatureData) => {
 
                   {/* Reconstructed Frame */}
                   <div className="space-y-2">
-                    <div className="font-medium text-sm">Reconstructed Frame</div>
+                    <div className="font-medium text-sm">
+                      Reconstructed Frame
+                    </div>
                     {isLoading ? (
                       <div className="w-full h-64 bg-gray-100 rounded-lg flex items-center justify-center">
                         Processing...
                       </div>
                     ) : reconstructedImage ? (
-                      <img 
-                        src={reconstructedImage} 
+                      <img
+                        src={reconstructedImage}
                         alt="Reconstructed frame"
                         className="w-full rounded-lg border border-gray-200"
                       />
