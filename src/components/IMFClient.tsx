@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
+import ProgressBar from '@/components/ui/progressbar'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import type * as tfjs from '@tensorflow/tfjs';
 
@@ -36,6 +37,10 @@ const IMFClient = () => {
   const [reconstructedImage, setReconstructedImage] = useState<string | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const modelRef = useRef<any>(null);
+  const [progress, setProgress] = useState<number>(0);
+  const [progressMessage, setProgressMessage] = useState<string>('');
+  const [showProgress, setShowProgress] = useState<boolean>(false);
+
 
    // Initialize WebSocket connection
    const connect = useCallback(() => {
@@ -90,34 +95,63 @@ const IMFClient = () => {
   }, [isModelLoaded]);
 
   // Load TensorFlow.js and model
-  useEffect(() => {
-    async function initializeModel() {
+// Modify the model loading function
+useEffect(() => {
+  async function initializeModel() {
+    try {
+      setShowProgress(true);
+      setProgressMessage('Initializing TensorFlow.js...');
+      setProgress(0.1);
+
+      const tf = await import('@tensorflow/tfjs');
+      await import('@tensorflow/tfjs-backend-webgpu');
+      
+      setProgress(0.2);
+      setProgressMessage('Setting up backend...');
+      
       try {
-        const tf = await import('@tensorflow/tfjs');
-        await import('@tensorflow/tfjs-backend-webgpu');
-        
-        try {
-          await tf.setBackend('webgpu');
-          await tf.ready();
-          console.log('Using WebGPU backend');
-        } catch (error) {
-          console.warn('WebGPU not available, falling back to WebGL');
-          await tf.setBackend('webgl');
-          await tf.ready();
-        }
-
-        setStatus('Loading model...');
-        const model = await tf.loadGraphModel('/graph_model/model.json');
-        modelRef.current = model;
-        setIsModelLoaded(true);
-        setStatus(isConnected ? 'Ready' : 'Connecting to server...');
-      } catch (err) {
-        setError('Failed to initialize model: ' + err.toString());
+        await tf.setBackend('webgpu');
+        await tf.ready();
+        console.log('Using WebGPU backend');
+      } catch (error) {
+        console.warn('WebGPU not available, falling back to WebGL');
+        await tf.setBackend('webgl');
+        await tf.ready();
       }
-    }
-    initializeModel();
-  }, []);
 
+      setProgress(0.4);
+      setProgressMessage('Loading model...');
+      
+      const model = await tf.loadGraphModel('/graph_model_client/model.json', {
+        onProgress: (fraction) => {
+          // Update progress from 40% to 90%
+          setProgress(0.4 + (fraction * 0.5));
+        }
+      });
+
+      setProgress(0.9);
+      setProgressMessage('Initializing model...');
+      
+      await inspectModel(model);
+      modelRef.current = model;
+      setIsModelLoaded(true);
+      
+      setProgress(1);
+      setProgressMessage('Model ready');
+      
+      // Hide progress bar after a short delay
+      setTimeout(() => {
+        setShowProgress(false);
+        setStatus(isConnected ? 'Ready' : 'Connecting to server...');
+      }, 500);
+
+    } catch (err) {
+      setError('Failed to initialize model: ' + err.toString());
+      setShowProgress(false);
+    }
+  }
+  initializeModel();
+}, []);
 
   // Connect WebSocket and fetch videos after model is loaded
   useEffect(() => {
@@ -237,9 +271,28 @@ const fetchFrame = async (videoId: number, frameId: number) => {
     }
 };
 
+// Helper function to inspect model signature
+const inspectModel = async (model: tfjs.GraphModel) => {
+    console.log("🔍 Model Signature:");
+    if (model.modelSignature) {
+        console.log("Inputs:", model.modelSignature.inputs);
+        console.log("Outputs:", model.modelSignature.outputs);
+    }
+    
+    console.log("🔍 Model Inputs:");
+    model.inputs.forEach((input, idx) => {
+        console.log(`Input ${idx}:`, {
+            name: input.name,
+            shape: input.shape,
+            dtype: input.dtype
+        });
+    });
+};
+
 // Enhanced processFeatures function with logging
 const processFeatures = async (features: FeatureData) => {
     console.log("🎯 Starting processFeatures");
+    const startTime = performance.now();
     
     if (!modelRef.current) {
         console.error("❌ Model not loaded");
@@ -249,52 +302,77 @@ const processFeatures = async (features: FeatureData) => {
 
     try {
         setIsLoading(true);
-        console.log("⏳ Loading state set to true");
-        
         const tf = await import('@tensorflow/tfjs');
-        console.log("✅ TensorFlow.js imported");
         
-        console.log("📊 Converting features to tensors");
-        console.log("Reference features shape:", features.reference_features.map(f => f.length));
-        console.log("Reference token length:", features.reference_token.length);
-        console.log("Current token length:", features.current_token.length);
-        
-        const startTime = performance.now();
-        
-        // Convert features to tensors
-        const referenceFeatures = features.reference_features.map(f => {
-            const tensor = tf.tensor(f);
-            console.log(`Reference feature tensor shape: ${tensor.shape}`);
-            return tensor;
-        });
-        const referenceToken = tf.tensor(features.reference_token);
-        const currentToken = tf.tensor(features.current_token);
-        
-        console.log("✅ Tensors created");
-        console.log("Reference token shape:", referenceToken.shape);
-        console.log("Current token shape:", currentToken.shape);
+        // Convert tokens - these keep :0 suffix
+        const currentToken = tf.tensor2d(
+            Array.isArray(features.current_token[0]) 
+                ? features.current_token 
+                : [features.current_token], 
+            [1, 32]
+        );
+        const referenceToken = tf.tensor2d(
+            Array.isArray(features.reference_token[0]) 
+                ? features.reference_token 
+                : [features.reference_token], 
+            [1, 32]
+        );
 
-        // Run inference
-        console.log("🔄 Running model inference");
-        const outputTensor = modelRef.current.execute({
-            'reference_features': referenceFeatures,
-            'reference_token': referenceToken,
-            'current_token': currentToken
+        // Convert reference features with correct shapes
+        const referenceFeatures = features.reference_features.map((feature, idx) => {
+            let shape;
+            switch(idx) {
+                case 0: shape = [1, 128, 64, 64]; break;
+                case 1: shape = [1, 256, 32, 32]; break;
+                case 2: shape = [1, 512, 16, 16]; break;
+                case 3: shape = [1, 512, 8, 8]; break;
+                default: throw new Error(`Unexpected feature index: ${idx}`);
+            }
+            return tf.tensor(feature, shape);
         });
-        
-        console.log("Output tensor shape:", outputTensor.shape);
+
+        // Log shapes for debugging
+        console.log("Input shapes:", {
+            currentToken: currentToken.shape,
+            referenceToken: referenceToken.shape,
+            referenceFeatures: referenceFeatures.map(t => t.shape)
+        });
+
+        // Create inputs object matching exact signature
+        const inputs = {
+            'args_0:0': currentToken,
+            'args_0_1:0': referenceToken,
+            'args_0_2': referenceFeatures[0],
+            'args_0_3': referenceFeatures[1],
+            'args_0_4': referenceFeatures[2],
+            'args_0_5': referenceFeatures[3]
+        };
+
+        console.log("Model inputs:", {
+            'args_0:0': inputs['args_0:0'].shape,
+            'args_0_1:0': inputs['args_0_1:0'].shape,
+            'args_0_2': inputs['args_0_2'].shape,
+            'args_0_3': inputs['args_0_3'].shape,
+            'args_0_4': inputs['args_0_4'].shape,
+            'args_0_5': inputs['args_0_5'].shape,
+        });
+
+        // Execute model
+        console.log("Executing model...");
+        const outputTensor = modelRef.current.execute(inputs);
+        console.log("Model execution complete, output shape:", outputTensor.shape);
 
         // Process output tensor
-        console.log("🔄 Processing output tensor");
         const processedTensor = tf.tidy(() => {
             let tensor = outputTensor;
-            console.log("Initial tensor shape:", tensor.shape);
             
+            // Convert from NCHW to NHWC if needed
             if (tensor.shape[1] === 3) {
                 tensor = tf.transpose(tensor, [0, 2, 3, 1]);
                 console.log("After transpose shape:", tensor.shape);
             }
             
+            // Remove batch dimension if present
             if (tensor.shape[0] === 1) {
                 tensor = tensor.squeeze([0]);
                 console.log("After squeeze shape:", tensor.shape);
@@ -320,28 +398,29 @@ const processFeatures = async (features: FeatureData) => {
         const canvas = document.createElement('canvas');
         canvas.width = 256;
         canvas.height = 256;
-        await tf.browser.toPixels(processedTensor as tf.Tensor3D, canvas);
+        await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
         
-        console.log("✅ Setting reconstructed image");
         setReconstructedImage(canvas.toDataURL());
         
         // Cleanup
-        console.log("🧹 Cleaning up tensors");
-        outputTensor.dispose();
-        processedTensor.dispose();
-        referenceFeatures.forEach(t => t.dispose());
-        referenceToken.dispose();
-        currentToken.dispose();
+        console.log("Cleaning up tensors");
+        [
+            currentToken, 
+            referenceToken, 
+            ...referenceFeatures,
+            outputTensor, 
+            processedTensor
+        ].forEach(t => t.dispose());
         
     } catch (err) {
         console.error("❌ Error in processFeatures:", err);
         console.error("Error stack:", err instanceof Error ? err.stack : "No stack trace available");
         setError('Processing error: ' + err.toString());
     } finally {
-        console.log("⏳ Setting loading state to false");
         setIsLoading(false);
     }
 };
+
 
     // Update select component to use both isConnected and isModelLoaded
     const isReady = isConnected && isModelLoaded;
@@ -362,6 +441,11 @@ const processFeatures = async (features: FeatureData) => {
 
   return (
     <Card className="w-full max-w-2xl">
+           <ProgressBar 
+      progress={progress}
+      message={progressMessage}
+      isVisible={showProgress}
+    />
       <CardHeader>
         <CardTitle>IMF Video Processing</CardTitle>
       </CardHeader>
