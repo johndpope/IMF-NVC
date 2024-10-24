@@ -1,5 +1,4 @@
-import type * as tfjs from '@tensorflow/tfjs';
-
+import type * as tfjs from "@tensorflow/tfjs";
 
 interface FeatureData {
   reference_features: number[][][];
@@ -8,32 +7,34 @@ interface FeatureData {
 }
 // Types for messaging and state management
 interface VideoState {
-    videoId: number;
-    currentFrame: number;
-    referenceFrame: number;
-    isPlaying: boolean;
-    bufferSize: number;
-    fps: number;
-  }
-  
-  interface FrameBuffer {
-    frames: Map<number, {
+  videoId: number;
+  currentFrame: number;
+  referenceFrame: number;
+  isPlaying: boolean;
+  bufferSize: number;
+  fps: number;
+}
+
+interface FrameBuffer {
+  frames: Map<
+    number,
+    {
       timestamp: number;
-      data: string;  // base64 encoded image
+      data: string; // base64 encoded image
       processed: boolean;
-    }>;
-    capacity: number;
-  }
-  
-  interface ServerMessage {
-    type: 'frame' | 'features' | 'error' | 'buffer_status';
-    payload: any;
-  }
-  
+    }
+  >;
+  capacity: number;
+}
+
+interface ServerMessage {
+  type: "frame" | "features" | "error" | "buffer_status";
+  payload: any;
+}
 
 // Additional types for event handling and metrics
 type EventCallback = (data: any) => void;
-type EventType = 'frameReady' | 'error' | 'bufferStatus' | 'metricsUpdate';
+type EventType = "frameReady" | "error" | "bufferStatus" | "metricsUpdate";
 
 interface CodecMetrics {
   fps: number;
@@ -59,7 +60,6 @@ interface NeuralVideoCodec {
   off(event: string, callback: (data: any) => void): void;
 }
 
-
 class NeuralVideoCodec {
   private ws: WebSocket | null = null;
   private frameBuffer: FrameBuffer;
@@ -70,132 +70,280 @@ class NeuralVideoCodec {
   private eventListeners: Map<EventType, Set<EventCallback>>;
   private metrics: CodecMetrics;
   private model: tfjs.GraphModel | null = null;
-  private retryCount: Map<number, number>;
-  private readonly MAX_RETRIES = 3;
+  private cachedFrames: Map<
+    number,
+    {
+      features: number[][][];
+      tokens: number[];
+      processed: boolean;
+    }
+  > = new Map();
+  private cachedRanges: [number, number][] = [];
+  private processingProgress: number = 0;
+
+  private referenceFeatures: Map<number, number[][][]> = new Map(); // videoId -> reference features
 
   constructor(config: CodecConfig = {}) {
     this.frameBuffer = {
       frames: new Map(),
-      capacity: config.bufferSize || 30
+      capacity: config.bufferSize || 30,
     };
-    
+
     this.state = {
       videoId: -1,
       currentFrame: 0,
       referenceFrame: 0,
       isPlaying: false,
       bufferSize: config.bufferSize || 30,
-      fps: config.fps || 30
+      fps: config.fps || 30,
     };
 
     this.FRAME_INTERVAL = 1000 / this.state.fps;
     this.eventListeners = new Map();
-    this.retryCount = new Map();
-    
+
     this.metrics = {
       fps: 0,
       bufferHealth: 100,
       processingTime: 0,
       networkLatency: 0,
       droppedFrames: 0,
-      lastUpdate: Date.now()
+      lastUpdate: Date.now(),
     };
 
     // Initialize event listeners
-    ['frameReady', 'error', 'bufferStatus', 'metricsUpdate'].forEach(event => {
-      this.eventListeners.set(event as EventType, new Set());
-    });
+    ["frameReady", "error", "bufferStatus", "metricsUpdate"].forEach(
+      (event) => {
+        this.eventListeners.set(event as EventType, new Set());
+      }
+    );
   }
   private currentVideoFrameCount: number = 0;
-    /**
- * Start playback of a video from the current position
- */
-    public async startPlayback(videoId: number): Promise<void> {
-      try {
-        // Get video metadata first
-        const metadata = await this.fetchVideoMetadata(videoId);
-        this.currentVideoFrameCount = metadata.frame_count;
-        
-        this.state.videoId = videoId;
-        this.state.isPlaying = true;
-        
-        // Clear existing buffer
-        this.frameBuffer.frames.clear();
-        this.processingQueue = [];
-        
-        // Initialize buffer with initial frames
-        await this.prefetchFrames();
-        
-        // Start playback loop
-        this.playbackLoop();
-        
-        this.emit('bufferStatus', {
-          videoId,
-          isPlaying: true,
-          currentFrame: this.state.currentFrame,
-          totalFrames: this.currentVideoFrameCount
-        });
-  
-      } catch (error: any) {
-        this.emit('error', {
-          message: 'Failed to start playback',
-          error: error.toString()
-        });
-        throw error;
-      }
-    }
-
-    private async fetchVideoMetadata(videoId: number): Promise<any> {
-      const response = await fetch(
-        `https://192.168.1.108:8000/videos/${videoId}/metadata`,
-        {
-          credentials: 'same-origin',
-          headers: {
-            'Accept': 'application/json'
-          }
-        }
-      );
-  
-      if (!response.ok) {
-        throw new Error(`Failed to fetch video metadata: ${response.statusText}`);
-      }
-  
-      return await response.json();
-    }
-
-    public async processFrames(): Promise<void> {
-    if (!this.state.videoId) {
-      throw new Error('No video selected');
-    }
-
+  /**
+   * Start playback of a video from the current position
+   */
+  public async startPlayback(videoId: number): Promise<void> {
     try {
-      // Fetch frames if not in buffer
-      const currentFrame = await this.ensureFrameLoaded(this.state.currentFrame);
-      const referenceFrame = await this.ensureFrameLoaded(this.state.referenceFrame);
+      const metadata = await this.fetchVideoMetadata(videoId);
+      this.currentVideoFrameCount = metadata.frame_count;
 
-      if (!currentFrame || !referenceFrame) {
-        throw new Error('Failed to load frames');
-      }
+      this.state.videoId = videoId;
+      this.state.isPlaying = true;
 
-      // Send frame processing request to server
-      this.sendMessage({
-        type: 'process_frames',
-        payload: {
-          videoId: this.state.videoId,
-          currentFrame: this.state.currentFrame,
-          referenceFrame: this.state.referenceFrame
-        }
+      // Clear existing caches
+      this.frameBuffer.frames.clear();
+      this.cachedFrames.clear();
+      this.cachedRanges = [];
+      this.processingQueue = [];
+
+      // Load reference features for this video
+      await this.loadReferenceFeatures(videoId);
+
+      // Initialize buffer
+      await this.initializeBuffer();
+
+      // Start playback loop
+      this.playbackLoop();
+
+      this.emit("bufferStatus", {
+        videoId,
+        isPlaying: true,
+        currentFrame: this.state.currentFrame,
+        totalFrames: this.currentVideoFrameCount,
+        cachedRanges: this.cachedRanges,
       });
-
-    } catch (error:any)  {
-      this.emit('error', {
-        message: 'Frame processing failed',
-        error: error.toString()
+    } catch (error: any) {
+      this.emit("error", {
+        message: "Failed to start playback",
+        error: error.toString(),
       });
       throw error;
     }
   }
 
+  private async loadReferenceFeatures(videoId: number): Promise<void> {
+    try {
+      console.log("Loading reference features for video", videoId);
+
+      // Request frame 0 to get reference features
+      const response = await this.requestFrameProcessing(0);
+
+      if (response.type === "error") {
+        throw new Error(response.message);
+      }
+
+      if (!response.features?.reference_features) {
+        throw new Error("No reference features in response");
+      }
+
+      // Store reference features
+      this.referenceFeatures.set(videoId, response.features.reference_features);
+      console.log("Successfully loaded reference features");
+    } catch (error) {
+      console.error("Error loading reference features:", error);
+      throw error;
+    }
+  }
+
+  private async processWithFeatures(
+    frameIndex: number,
+    tokens: number[]
+  ): Promise<string> {
+    if (!this.model || !this.state.videoId) {
+      throw new Error("Model or video not initialized");
+    }
+
+    const refFeatures = this.referenceFeatures.get(this.state.videoId);
+    if (!refFeatures) {
+      throw new Error("Reference features not loaded");
+    }
+
+    try {
+      const tf = await import("@tensorflow/tfjs");
+
+      // Convert tokens to tensor
+      const tokenTensor = tf
+        .tensor2d([tokens], [1, tokens.length])
+        .asType("float32");
+
+      // Convert reference features to tensors
+      const referenceFeatures = refFeatures.map((feature, idx) => {
+        const shapes = [
+          [1, 128, 64, 64],
+          [1, 256, 32, 32],
+          [1, 512, 16, 16],
+          [1, 512, 8, 8],
+        ];
+        return tf.tensor(feature, shapes[idx]).asType("float32");
+      });
+
+      // Execute model
+      const outputTensor: any = this.model.execute({
+        "args_0:0": tokenTensor,
+        "args_0_1:0": tokenTensor, // Use same token for both inputs
+        args_0_2: referenceFeatures[0],
+        args_0_3: referenceFeatures[1],
+        args_0_4: referenceFeatures[2],
+        args_0_5: referenceFeatures[3],
+      });
+
+      // Process output tensor
+      const processedTensor = tf.tidy(() => {
+        let tensor = outputTensor;
+        if (tensor.shape[1] === 3) {
+          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+        }
+        tensor = tensor.squeeze([0]);
+        return tf.clipByValue(tensor, 0, 1);
+      });
+
+      // Convert to image
+      const canvas = document.createElement("canvas");
+      canvas.width = processedTensor.shape[1];
+      canvas.height = processedTensor.shape[0];
+      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+
+      // Cleanup
+      [
+        tokenTensor,
+        ...referenceFeatures,
+        outputTensor,
+        processedTensor,
+      ].forEach((t) => t.dispose());
+
+      return canvas.toDataURL();
+    } catch (error) {
+      console.error("Error processing frame:", error);
+      throw error;
+    }
+  }
+  /**
+   * Initialize buffer with cached frames if available
+   */
+  private async initializeBuffer(): Promise<void> {
+    try {
+      // Request initial frame processing to get cache information
+      const response = await this.requestFrameProcessing(
+        this.state.currentFrame
+      );
+
+      if (response.cached_frames) {
+        // Update cache information
+        Object.entries(response.cached_frames).forEach(([frameId, data]) => {
+          this.cachedFrames.set(parseInt(frameId), {
+            features: data.features,
+            tokens: data.tokens,
+            processed: true,
+          });
+        });
+      }
+
+      if (response.metadata?.cached_ranges) {
+        this.cachedRanges = response.metadata.cached_ranges;
+        this.processingProgress = response.metadata.processing_progress || 0;
+      }
+
+      // Initialize buffer with either cached frames or fetch new ones
+      const initialFrames = Math.min(this.frameBuffer.capacity, 5);
+      await this.prefetchFrames(initialFrames);
+    } catch (error: any) {
+      console.error("Buffer initialization error:", error);
+      throw error;
+    }
+  }
+
+  private async fetchVideoMetadata(videoId: number): Promise<any> {
+    const response = await fetch(
+      `https://192.168.1.108:8000/videos/${videoId}/metadata`,
+      {
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch video metadata: ${response.statusText}`);
+    }
+
+    return await response.json();
+  }
+
+  public async processFrames(): Promise<void> {
+    if (!this.state.videoId) {
+      throw new Error("No video selected");
+    }
+
+    try {
+      // Fetch frames if not in buffer
+      const currentFrame = await this.ensureFrameLoaded(
+        this.state.currentFrame
+      );
+      const referenceFrame = await this.ensureFrameLoaded(
+        this.state.referenceFrame
+      );
+
+      if (!currentFrame || !referenceFrame) {
+        throw new Error("Failed to load frames");
+      }
+
+      // Send frame processing request to server
+      this.sendMessage({
+        type: "process_frames",
+        payload: {
+          videoId: this.state.videoId,
+          currentFrame: this.state.currentFrame,
+          referenceFrame: this.state.referenceFrame,
+        },
+      });
+    } catch (error: any) {
+      this.emit("error", {
+        message: "Frame processing failed",
+        error: error.toString(),
+      });
+      throw error;
+    }
+  }
 
   /**
    * Ensure a frame is loaded in the buffer
@@ -214,72 +362,70 @@ class NeuralVideoCodec {
         this.frameBuffer.frames.set(frameIndex, {
           timestamp: Date.now(),
           data: frameData,
-          processed: false
+          processed: false,
         });
         return frameData;
       }
-    } catch (error:any)  {
+    } catch (error: any) {
       console.error(`Failed to fetch frame ${frameIndex}:`, error);
     }
 
     return null;
   }
 
+  // Also update WebSocket connection if you're using credentials
+  public async connect(serverUrl: string): Promise<void> {
+    return new Promise((resolve, reject) => {
+      this.ws = new WebSocket(serverUrl);
 
+      this.ws.onopen = async () => {
+        try {
+          await this.initializeConnection();
+          resolve();
+        } catch (error) {
+          reject(error);
+        }
+      };
 
-    // Also update WebSocket connection if you're using credentials
-    public async connect(serverUrl: string): Promise<void> {
-      return new Promise((resolve, reject) => {
-        this.ws = new WebSocket(serverUrl);
-        
-        this.ws.onopen = async () => {
-          try {
-            await this.initializeConnection();
-            resolve();
-          } catch (error) {
-            reject(error);
-          }
-        };
-    
-        this.ws.onmessage = this.handleServerMessage.bind(this);
-        this.ws.onerror = (error) => reject(error);
-        this.ws.onclose = this.handleDisconnect.bind(this);
-      });
-    }
+      this.ws.onmessage = this.handleServerMessage.bind(this);
+      this.ws.onerror = (error) => reject(error);
+      this.ws.onclose = this.handleDisconnect.bind(this);
+    });
+  }
 
   private async initializeConnection(): Promise<void> {
     if (!this.ws) return;
-  
+
     try {
       // Send initial configuration
       const initMessage = {
-        type: 'init',
+        type: "init",
         payload: {
           bufferSize: this.state.bufferSize,
-          fps: this.state.fps
-        }
+          fps: this.state.fps,
+        },
       };
-  
+
       this.sendMessage(initMessage);
-      
+
       // Wait for server acknowledgment
       const response = await new Promise<any>((resolve, reject) => {
         const timeout = setTimeout(() => {
-          reject(new Error('Initialization timeout'));
-        }, 5000);  // 5 second timeout
-  
+          reject(new Error("Initialization timeout"));
+        }, 5000); // 5 second timeout
+
         const handleInit = (event: MessageEvent) => {
           const message = JSON.parse(event.data);
-          if (message.type === 'init_response') {
-            this.ws?.removeEventListener('message', handleInit);
+          if (message.type === "init_response") {
+            this.ws?.removeEventListener("message", handleInit);
             clearTimeout(timeout);
             resolve(message);
           }
         };
-  
-        this.ws?.addEventListener('message', handleInit);
+
+        this.ws?.addEventListener("message", handleInit);
       });
-  
+
       // Update configuration with server limits
       if (response.config) {
         this.state.bufferSize = Math.min(
@@ -287,146 +433,278 @@ class NeuralVideoCodec {
           response.config.bufferSize
         );
         this.frameBuffer.capacity = this.state.bufferSize;
-        
+
         // Update other configurations
         if (response.config.maxFrames) {
           this.maxFrames = response.config.maxFrames;
         }
       }
-  
-      console.log('Connection initialized with config:', response.config);
-  
+
+      console.log("Connection initialized with config:", response.config);
     } catch (error) {
-      console.error('Failed to initialize connection:', error);
+      console.error("Failed to initialize connection:", error);
       throw error;
     }
   }
 
   /**
- * Handle server messages
- */
+   * Handle server messages
+   */
   private handleServerMessage(event: MessageEvent): void {
     try {
       const message = JSON.parse(event.data);
-      console.log('Received server message:', message);
-  
+      console.log("Received server message:", message);
+
       switch (message.type) {
-        case 'init_response':
+        case "init_response":
           // Handled by initializeConnection
           break;
-  
-        case 'frame_features':
+
+        case "frame_features":
           this.processFeatures(message.features)
-            .then(timing => {
+            .then((timing) => {
               this.metrics.processingTime = timing.total;
               if (message.metadata?.frame_count) {
                 this.currentVideoFrameCount = message.metadata.frame_count;
               }
               this.updateMetrics();
             })
-            .catch(error => this.handleError({
-              message: 'Failed to process features',
-              error: error.toString()
-            }));
+            .catch((error) =>
+              this.handleError({
+                message: "Failed to process features",
+                error: error.toString(),
+              })
+            );
           break;
-        
-        case 'error':
+
+        case "error":
           this.handleError(message);
           break;
-        
+
         default:
-          console.warn('Unknown message type:', message.type);
+          console.warn("Unknown message type:", message.type);
       }
-    } catch (error) {
-      console.error('Error parsing server message:', error);
+    } catch (error: any) {
+      console.error("Error parsing server message:", error);
       this.handleError({
-        message: 'Failed to parse server message',
-        error: error.toString()
+        message: "Failed to parse server message",
+        error: error.toString(),
       });
     }
   }
 
-/**
- * Process features received from server
- */
-private async processFeatures(features: FeatureData): Promise<any> {
-  if (!this.model) {
-    throw new Error('Model not initialized');
-  }
-
-  const timing = {
-    start: performance.now(),
-    total: 0
-  };
-
-  try {
-    const tf = await import('@tensorflow/tfjs');
-    
-    // Prepare input tensors
-    const currentToken = tf.tensor2d(
-      Array.isArray(features.current_token[0]) 
-        ? features.current_token 
-        : [features.current_token], 
-      [1, 32]
-    ).asType('float32');
-
-    const referenceToken = tf.tensor2d(
-      Array.isArray(features.reference_token[0]) 
-        ? features.reference_token 
-        : [features.reference_token], 
-      [1, 32]
-    ).asType('float32');
-
-    // Convert reference features with explicit shapes
-    const referenceFeatures = features.reference_features.map((feature, idx) => {
-      const shapes = [[1, 128, 64, 64], [1, 256, 32, 32], [1, 512, 16, 16], [1, 512, 8, 8]];
-      return tf.tensor(feature, shapes[idx]).asType('float32');
-    });
-
-    // Execute model with all required inputs
-    const outputTensor = this.model.execute({
-      'args_0:0': currentToken,
-      'args_0_1:0': referenceToken,
-      'args_0_2': referenceFeatures[0],
-      'args_0_3': referenceFeatures[1],
-      'args_0_4': referenceFeatures[2],
-      'args_0_5': referenceFeatures[3]
-    });
-
-    // Process output tensor
-    const processedTensor = tf.tidy(() => {
-      let tensor = outputTensor;
-      if (tensor.shape[1] === 3) {
-        tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+  /**
+   * Process features received from server
+   */
+  private async processFeatures(features: FeatureData): Promise<any> {
+    if (!this.model) {
+      throw new Error('Model not initialized');
+    }
+  
+    const timing = {
+      start: performance.now(),
+      total: 0
+    };
+  
+    try {
+      const tf = await import('@tensorflow/tfjs');
+      
+      console.log('Processing features:', features);
+      
+      // Prepare current token tensor
+      const currentToken = tf.tensor2d(
+        Array.isArray(features.current_token[0]) 
+          ? features.current_token 
+          : [features.current_token], 
+        [1, 32]
+      ).asType('float32');
+  
+      // Use the same token for reference
+      const referenceToken = currentToken;
+  
+      // Convert reference features with explicit shapes
+      const referenceFeatures = features.reference_features.map((featureGroup, idx) => {
+        const shapes = [[1, 128, 64, 64], [1, 256, 32, 32], [1, 512, 16, 16], [1, 512, 8, 8]];
+        const shape = shapes[idx];
+        
+        console.log(`Processing feature group ${idx}`);
+        console.log('Shape:', shape);
+        
+        // Get the feature data and ensure it's in the correct format
+        let featureData = featureGroup[0];
+        
+        // Check if we need to reshape the data
+        const totalElements = shape.reduce((a, b) => a * b);
+        if (Array.isArray(featureData) && !Array.isArray(featureData[0])) {
+          // Reshape flat array into proper dimensions
+          const temp = [];
+          let index = 0;
+          
+          // Create the 4D structure [1][channels][height][width]
+          for (let c = 0; c < shape[1]; c++) {
+            const channel = [];
+            for (let h = 0; h < shape[2]; h++) {
+              const row = [];
+              for (let w = 0; w < shape[3]; w++) {
+                row.push(featureData[index++]);
+              }
+              channel.push(row);
+            }
+            temp.push(channel);
+          }
+          featureData = [temp];
+        }
+  
+        // Verify the data shape before creating tensor
+        const verifyShape = (arr: any[], dims: number[]): boolean => {
+          if (dims.length === 0) return true;
+          if (!Array.isArray(arr)) return false;
+          if (arr.length !== dims[0]) return false;
+          if (dims.length === 1) return true;
+          return arr.every(item => verifyShape(item, dims.slice(1)));
+        };
+  
+        if (!verifyShape(featureData, shape)) {
+          console.error('Feature data shape mismatch:', {
+            expected: shape,
+            data: featureData
+          });
+          throw new Error(`Feature data shape mismatch for group ${idx}`);
+        }
+  
+        return tf.tensor(featureData, shape).asType('float32');
+      });
+  
+      console.log('Created reference feature tensors');
+  
+      // Execute model with all required inputs
+      const outputTensor = this.model.execute({
+        'args_0:0': currentToken,
+        'args_0_1:0': referenceToken,
+        'args_0_2': referenceFeatures[0],
+        'args_0_3': referenceFeatures[1],
+        'args_0_4': referenceFeatures[2],
+        'args_0_5': referenceFeatures[3]
+      });
+  
+      if (!outputTensor) {
+        throw new Error('Model execution returned null');
       }
-      tensor = tensor.squeeze([0]);
-      return tf.clipByValue(tensor, 0, 1);
-    });
-
-    // Convert to image
-    const canvas = document.createElement('canvas');
-    canvas.width = processedTensor.shape[1];
-    canvas.height = processedTensor.shape[0];
-    await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-
-    // Emit processed frame
-    this.emit('frameReady', {
-      frameIndex: this.state.currentFrame,
-      imageUrl: canvas.toDataURL()
-    });
-
-    // Cleanup
-    [currentToken, referenceToken, ...referenceFeatures, outputTensor, processedTensor]
-      .forEach(t => t.dispose());
-
-    timing.total = performance.now() - timing.start;
-    return timing;
-
-  } catch (error) {
-    console.error('Error processing features:', error);
-    throw error;
+  
+      // Process output tensor
+      const processedTensor = tf.tidy(() => {
+        let tensor = outputTensor;
+        if (tensor.shape[1] === 3) {
+          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+        }
+        tensor = tensor.squeeze([0]);
+        return tf.clipByValue(tensor, 0, 1);
+      });
+  
+      // Convert to image
+      const canvas = document.createElement('canvas');
+      canvas.width = processedTensor.shape[1];
+      canvas.height = processedTensor.shape[0];
+      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+  
+      // Emit processed frame
+      this.emit('frameReady', {
+        frameIndex: this.state.currentFrame,
+        imageUrl: canvas.toDataURL()
+      });
+  
+      // Cleanup
+      [currentToken, ...referenceFeatures, outputTensor, processedTensor].forEach(t => t.dispose());
+  
+      timing.total = performance.now() - timing.start;
+      return timing;
+  
+    } catch (error) {
+      console.error('Error processing features:', error);
+      console.error('Feature data:', {
+        currentToken: features.current_token,
+        referenceFeatures: features.reference_features.map(f => ({
+          shape: Array.isArray(f[0]) ? f[0].length : 'unknown',
+          data: f[0]
+        }))
+      });
+      throw error;
+    }
   }
-}
+  
+  // Update the token cache handling
+  private async processWithCache(frameIndex: number): Promise<string> {
+    const cachedData = this.cachedFrames.get(frameIndex);
+    if (!cachedData) {
+      throw new Error('Cached data not found');
+    }
+  
+    try {
+      const tf = await import('@tensorflow/tfjs');
+      
+      // Create token tensor
+      const tokenArray = Array.isArray(cachedData.tokens[0]) 
+        ? cachedData.tokens 
+        : [cachedData.tokens];
+        
+      const currentToken = tf.tensor2d(tokenArray, [1, 32]).asType('float32');
+  
+      // Get reference features for this video
+      const refFeatures = this.referenceFeatures.get(this.state.videoId);
+      if (!refFeatures) {
+        throw new Error('Reference features not found');
+      }
+  
+      // Convert reference features to tensors
+      const referenceFeatures = refFeatures.map((featureGroup, idx) => {
+        const shapes = [[1, 128, 64, 64], [1, 256, 32, 32], [1, 512, 16, 16], [1, 512, 8, 8]];
+        const shape = shapes[idx];
+        
+        // Handle nested array structure
+        let featureData = featureGroup[0];
+        if (!Array.isArray(featureData[0])) {
+          featureData = [featureData];
+        }
+        
+        return tf.tensor(featureData, shape).asType('float32');
+      });
+  
+      // Execute model
+      const outputTensor = this.model.execute({
+        'args_0:0': currentToken,
+        'args_0_1:0': currentToken,
+        'args_0_2': referenceFeatures[0],
+        'args_0_3': referenceFeatures[1],
+        'args_0_4': referenceFeatures[2],
+        'args_0_5': referenceFeatures[3]
+      });
+  
+      // Process tensor and convert to image
+      const processedTensor = tf.tidy(() => {
+        let tensor = outputTensor;
+        if (tensor.shape[1] === 3) {
+          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+        }
+        tensor = tensor.squeeze([0]);
+        return tf.clipByValue(tensor, 0, 1);
+      });
+  
+      const canvas = document.createElement('canvas');
+      canvas.width = processedTensor.shape[1];
+      canvas.height = processedTensor.shape[0];
+      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+  
+      // Cleanup
+      [currentToken, ...referenceFeatures, outputTensor, processedTensor].forEach(t => t.dispose());
+  
+      return canvas.toDataURL();
+  
+    } catch (error) {
+      console.error('Error processing cached frame:', error);
+      console.error('Cached data:', cachedData);
+      throw error;
+    }
+  }
 
   // Event handling methods
   public on(event: EventType, callback: EventCallback): void {
@@ -446,95 +724,99 @@ private async processFeatures(features: FeatureData): Promise<any> {
   private emit(event: EventType, data: any): void {
     const listeners = this.eventListeners.get(event);
     if (listeners) {
-      listeners.forEach(callback => callback(data));
+      listeners.forEach((callback) => callback(data));
     }
   }
 
   // Neural processing methods
   private async initializeModel(modelPath: string): Promise<void> {
     try {
-      const tf = await import('@tensorflow/tfjs');
-      await import('@tensorflow/tfjs-backend-webgpu');
+      const tf = await import("@tensorflow/tfjs");
+      await import("@tensorflow/tfjs-backend-webgpu");
 
       try {
-        await tf.setBackend('webgpu');
+        await tf.setBackend("webgpu");
         await tf.ready();
-        console.log('Using WebGPU backend');
-      } catch (error:any)  {
-        console.warn('WebGPU not available, falling back to WebGL');
-        await tf.setBackend('webgl');
+        console.log("Using WebGPU backend");
+      } catch (error: any) {
+        console.warn("WebGPU not available, falling back to WebGL");
+        await tf.setBackend("webgl");
         await tf.ready();
       }
 
       this.model = await tf.loadGraphModel(modelPath);
-      console.log('Model loaded successfully');
-    } catch (error:any)  {
-      console.error('Error loading model:', error);
+      console.log("Model loaded successfully");
+    } catch (error: any) {
+      console.error("Error loading model:", error);
       throw error;
     }
   }
 
   private async runNeuralCodec(frameData: string): Promise<string> {
     if (!this.model) {
-      throw new Error('Model not initialized');
+      throw new Error("Model not initialized");
     }
 
     const processStart = performance.now();
     try {
-      const tf = await import('@tensorflow/tfjs');
-      
+      const tf = await import("@tensorflow/tfjs");
+
       // Convert base64 to image tensor
       const img = await this.base64ToTensor(frameData);
-      
+
       // Process through model
       const outputTensor = await this.processWithModel(img);
-      
+
       // Convert back to image
       const processedImageData = await this.tensorToImage(outputTensor);
-      
+
       // Update metrics
       this.metrics.processingTime = performance.now() - processStart;
       this.updateMetrics();
-      
-      return processedImageData;
 
-    } catch (error:any)  {
-      console.error('Error in neural processing:', error);
+      return processedImageData;
+    } catch (error: any) {
+      console.error("Error in neural processing:", error);
       throw error;
     }
   }
 
   private async base64ToTensor(base64Data: string): Promise<tfjs.Tensor4D> {
-    const tf = await import('@tensorflow/tfjs');
+    const tf = await import("@tensorflow/tfjs");
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
         try {
-          const tensor = tf.browser.fromPixels(img)
+          const tensor = tf.browser
+            .fromPixels(img)
             .toFloat()
             .expandDims(0)
             .transpose([0, 3, 1, 2]); // Convert to NCHW format
           resolve(tensor as tfjs.Tensor4D);
-        } catch (error:any)  {
-          reject(error) ;
+        } catch (error: any) {
+          reject(error);
         }
       };
       img.onerror = reject;
-      img.src = base64Data.startsWith('data:') ? base64Data : `data:image/png;base64,${base64Data}`;
+      img.src = base64Data.startsWith("data:")
+        ? base64Data
+        : `data:image/png;base64,${base64Data}`;
     });
   }
 
-  private async processWithModel(inputTensor: tfjs.Tensor4D): Promise<tfjs.Tensor4D> {
-    if (!this.model) throw new Error('Model not initialized');
-    
+  private async processWithModel(
+    inputTensor: tfjs.Tensor4D
+  ): Promise<tfjs.Tensor4D> {
+    if (!this.model) throw new Error("Model not initialized");
+
     const result = this.model.execute(inputTensor) as tfjs.Tensor4D;
     inputTensor.dispose();
     return result;
   }
 
   private async tensorToImage(tensor: tfjs.Tensor4D): Promise<string> {
-    const tf = await import('@tensorflow/tfjs');
-    
+    const tf = await import("@tensorflow/tfjs");
+
     // Process tensor to correct format
     const processedTensor = tf.tidy(() => {
       let t = tensor;
@@ -546,29 +828,29 @@ private async processFeatures(features: FeatureData): Promise<any> {
     });
 
     // Convert to canvas
-    const canvas = document.createElement('canvas');
+    const canvas = document.createElement("canvas");
     canvas.width = processedTensor.shape[1];
     canvas.height = processedTensor.shape[0];
     await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-    
+
     // Cleanup
     processedTensor.dispose();
     tensor.dispose();
-    
+
     return canvas.toDataURL();
   }
 
   // Buffer management methods
   private async handleFrameData(payload: any): Promise<void> {
     const { frameIndex, data } = payload;
-    
+
     if (!this.frameBuffer.frames.has(frameIndex)) {
       this.frameBuffer.frames.set(frameIndex, {
         timestamp: Date.now(),
         data,
-        processed: false
+        processed: false,
       });
-      
+
       // Update buffer status
       this.updateBufferStatus();
     }
@@ -577,17 +859,18 @@ private async processFeatures(features: FeatureData): Promise<any> {
   private handleFeatureData(payload: any): void {
     // Process incoming feature data
     // This would be used for frame interpolation or enhancement
-    console.log('Received feature data:', payload);
+    console.log("Received feature data:", payload);
   }
 
   private updateBufferStatus(): void {
-    const bufferHealth = (this.frameBuffer.frames.size / this.frameBuffer.capacity) * 100;
+    const bufferHealth =
+      (this.frameBuffer.frames.size / this.frameBuffer.capacity) * 100;
     this.metrics.bufferHealth = bufferHealth;
-    
-    this.emit('bufferStatus', {
+
+    this.emit("bufferStatus", {
       health: bufferHealth,
       frameCount: this.frameBuffer.frames.size,
-      capacity: this.frameBuffer.capacity
+      capacity: this.frameBuffer.capacity,
     });
   }
 
@@ -595,18 +878,19 @@ private async processFeatures(features: FeatureData): Promise<any> {
   private updateMetrics(): void {
     const now = Date.now();
     const timeDiff = now - this.metrics.lastUpdate;
-    
-    if (timeDiff >= 1000) { // Update every second
+
+    if (timeDiff >= 1000) {
+      // Update every second
       this.metrics.fps = 1000 / this.FRAME_INTERVAL;
       this.metrics.lastUpdate = now;
-      
-      this.emit('metricsUpdate', this.metrics);
+
+      this.emit("metricsUpdate", this.metrics);
     }
   }
 
   private handleError(payload: any): void {
-    console.error('Codec error:', payload);
-    this.emit('error', payload);
+    console.error("Codec error:", payload);
+    this.emit("error", payload);
   }
 
   private handleBufferStatus(payload: any): void {
@@ -615,7 +899,7 @@ private async processFeatures(features: FeatureData): Promise<any> {
   }
 
   private handleDisconnect(): void {
-    console.log('WebSocket disconnected');
+    console.log("WebSocket disconnected");
     this.reconnect();
   }
 
@@ -623,8 +907,8 @@ private async processFeatures(features: FeatureData): Promise<any> {
     if (this.ws?.readyState === WebSocket.CLOSED) {
       try {
         await this.connect(this.ws.url);
-      } catch (error:any)  {
-        console.error('Reconnection failed:', error);
+      } catch (error: any) {
+        console.error("Reconnection failed:", error);
         setTimeout(() => this.reconnect(), 5000);
       }
     }
@@ -662,76 +946,199 @@ private async processFeatures(features: FeatureData): Promise<any> {
     }
   }
 
-   /**
+  /**
    * Fetch a frame from the server
    */
-   private async fetchFrame(frameIndex: number): Promise<string | null> {
+  private async fetchFrame(frameIndex: number): Promise<string | null> {
     try {
       const startTime = performance.now();
-  
+
       // Check if frame index is valid
       if (frameIndex < 0 || !this.state.videoId) {
-        throw new Error('Invalid frame request');
+        throw new Error("Invalid frame request");
       }
-  
+
       const response = await fetch(
         `https://192.168.1.108:8000/videos/${this.state.videoId}/frames/${frameIndex}`,
         {
-          credentials: 'same-origin',  // Change from 'include' to 'same-origin'
+          credentials: "same-origin", // Change from 'include' to 'same-origin'
           headers: {
-            'Accept': 'application/json'
-          }
+            Accept: "application/json",
+          },
         }
       );
-  
+
       if (response.status === 404) {
         console.warn(`Frame ${frameIndex} not found`);
         return null;
       }
-  
+
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-  
+
       const data = await response.json();
-      
+
       // Update network latency metrics
       this.metrics.networkLatency = performance.now() - startTime;
-      
+
       return data.frame; // base64 encoded image data
-  
     } catch (error: any) {
-      if (error.message.includes('404')) {
+      if (error.message.includes("404")) {
         // Handle missing frames gracefully
         return null;
       }
-      
+
       this.handleError({
         message: `Failed to fetch frame ${frameIndex}`,
-        error: error.toString()
+        error: error.toString(),
       });
       return null;
     }
   }
-  
-  
 
   /**
-   * Prefetch frames to fill buffer
+   * Prefetch frames with cache awareness
    */
-  private async prefetchFrames(): Promise<void> {
-    const prefetchCount = Math.min(
-      this.frameBuffer.capacity,
-      5 // Start with 5 frames initially
-    );
-
+  private async prefetchFrames(count: number): Promise<void> {
     const fetchPromises = [];
-    for (let i = 0; i < prefetchCount; i++) {
-      fetchPromises.push(this.ensureFrameLoaded(this.state.currentFrame + i));
+    for (let i = 0; i < count; i++) {
+      const frameIndex = this.state.currentFrame + i;
+
+      // Skip if frame is already in buffer
+      if (this.frameBuffer.frames.has(frameIndex)) continue;
+
+      // Check if frame is in cached ranges
+      const isInCachedRange = this.cachedRanges.some(
+        ([start, end]) => frameIndex >= start && frameIndex <= end
+      );
+
+      if (isInCachedRange && this.cachedFrames.has(frameIndex)) {
+        // Use cached frame
+        this.frameBuffer.frames.set(frameIndex, {
+          timestamp: Date.now(),
+          data: await this.processWithCache(frameIndex),
+          processed: true,
+        });
+      } else {
+        // Fetch frame if not cached
+        fetchPromises.push(this.fetchFrame(frameIndex));
+      }
     }
 
-    await Promise.all(fetchPromises);
+    if (fetchPromises.length > 0) {
+      await Promise.all(fetchPromises);
+    }
+
     this.updateBufferStatus();
+  }
+
+  /**
+   * Process frames with cache awareness
+   */
+  private async processNextFrame(): Promise<void> {
+    if (this.processingQueue.length === 0) {
+      if (this.state.currentFrame >= this.currentVideoFrameCount - 1) {
+        this.stop();
+        return;
+      }
+      this.processingQueue.push(this.state.currentFrame);
+    }
+
+    const frameIndex = this.processingQueue[0];
+
+    try {
+      let frameData: string;
+
+      // Check if frame has cached tokens
+      const cachedFrame = this.cachedFrames.get(frameIndex);
+      if (cachedFrame?.tokens) {
+        // Process frame using cached tokens and reference features
+        frameData = await this.processWithFeatures(
+          frameIndex,
+          cachedFrame.tokens
+        );
+      } else {
+        // Request tokens from server
+        const response = await this.requestFrameProcessing(frameIndex);
+        if (!response.features?.current_token) {
+          throw new Error("No token data in response");
+        }
+
+        // Process frame with new tokens
+        frameData = await this.processWithFeatures(
+          frameIndex,
+          response.features.current_token
+        );
+
+        // Cache the tokens
+        this.cachedFrames.set(frameIndex, {
+          tokens: response.features.current_token,
+          features: [], // We don't need to store features per frame anymore
+          processed: true,
+        });
+      }
+
+      // Emit processed frame
+      this.emit("frameReady", {
+        frameIndex,
+        imageUrl: frameData,
+        fromCache: !!cachedFrame,
+      });
+
+      // Update state
+      this.processingQueue.shift();
+      this.state.currentFrame++;
+    } catch (error: any) {
+      console.error("Frame processing error:", error);
+      this.metrics.droppedFrames++;
+      this.processingQueue.shift();
+    }
+  }
+  /**
+   * Request frame processing from server
+   */
+  private async requestFrameProcessing(frameIndex: number): Promise<any> {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error('WebSocket not connected');
+    }
+
+    return new Promise((resolve, reject) => {
+      const messageHandler = (event: MessageEvent) => {
+        const response = JSON.parse(event.data);
+        
+        if (response.type === 'error') {
+          this.ws?.removeEventListener('message', messageHandler);
+          reject(new Error(response.message));
+          return;
+        }
+
+        if (response.type === 'frame_features' && 
+            response.current_frame === frameIndex) {
+          this.ws?.removeEventListener('message', messageHandler);
+          resolve(response);
+        }
+      };
+
+      this.ws.addEventListener('message', messageHandler);
+
+      const message = {
+        type: 'process_frames',
+        payload: {
+          video_id: this.state.videoId,
+          current_frame: frameIndex,
+          reference_frame: 0  // Always use frame 0 as reference
+        }
+      };
+
+      this.sendMessage(message);
+
+      // Add timeout
+      setTimeout(() => {
+        this.ws?.removeEventListener('message', messageHandler);
+        reject(new Error('Frame processing request timeout'));
+      }, 10000);  // Increased timeout for initial load
+    });
   }
 
   /**
@@ -739,93 +1146,37 @@ private async processFeatures(features: FeatureData): Promise<any> {
    */
   private async playbackLoop(): Promise<void> {
     if (!this.state.isPlaying) return;
-  
+
     const now = performance.now();
     const timeSinceLastFrame = now - this.lastProcessedTime;
-  
+
     if (timeSinceLastFrame >= this.FRAME_INTERVAL) {
       try {
         await this.processNextFrame();
         this.lastProcessedTime = now;
-  
+
         // Maintain buffer
         await this.maintainBuffer();
-        
+
         // Update metrics
         this.updateMetrics();
       } catch (error) {
-        console.error('Playback error:', error);
+        console.error("Playback error:", error);
         this.metrics.droppedFrames++;
-        
+
         // Check if we should stop playback
-        if (error instanceof Error && error.message.includes('404')) {
-          console.log('Reached end of video');
+        if (error instanceof Error && error.message.includes("404")) {
+          console.log("Reached end of video");
           this.stop();
           return;
         }
       }
     }
-  
+
     if (this.state.isPlaying) {
       requestAnimationFrame(() => this.playbackLoop());
     }
   }
-
-  /**
-   * Process the next frame in the queue
-   */
-  private async processNextFrame(): Promise<void> {
-    if (this.processingQueue.length === 0) {
-      // Check if we've reached the end of the video
-      if (this.state.currentFrame >= this.currentVideoFrameCount - 1) {
-        console.log('Reached end of video');
-        this.stop();
-        return;
-      }
-      this.processingQueue.push(this.state.currentFrame);
-    }
-  
-    const frameIndex = this.processingQueue[0];
-  
-    try {
-      // First request frames and features from server
-      await this.requestFrameProcessing(frameIndex);
-      
-      // The actual processing will happen when we receive the 'frame_features' message
-      // in handleServerMessage
-  
-      // Move to next frame
-      this.processingQueue.shift();
-      this.state.currentFrame++;
-  
-    } catch (error: any) {
-      console.error('Frame processing error:', error);
-      this.metrics.droppedFrames++;
-      this.processingQueue.shift(); // Skip problematic frame
-    }
-  }
-  /**
- * Request frame processing from server
- */
-  private async requestFrameProcessing(frameIndex: number): Promise<void> {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      throw new Error('WebSocket not connected');
-    }
-  
-    // Send processing request to server with correct payload structure
-    const message = {
-      type: 'process_frames',
-      payload: {
-        video_id: this.state.videoId,
-        current_frame: frameIndex,
-        reference_frame: this.state.referenceFrame
-      }
-    };
-  
-    console.log('Sending WebSocket message:', message);
-    this.sendMessage(message);
-  }
-
 
   /**
    * Maintain the frame buffer
@@ -842,21 +1193,22 @@ private async processFeatures(features: FeatureData): Promise<any> {
 
       // Get max buffered frame
       const frameIndices = Array.from(this.frameBuffer.frames.keys());
-      const maxBufferedFrame = frameIndices.length > 0 
-        ? Math.max(...frameIndices)
-        : this.state.currentFrame - 1;
+      const maxBufferedFrame =
+        frameIndices.length > 0
+          ? Math.max(...frameIndices)
+          : this.state.currentFrame - 1;
 
       // Calculate next frame to buffer
       const nextFrame = maxBufferedFrame + 1;
 
       // Check if we've reached the end of the video
       if (nextFrame >= this.currentVideoFrameCount) {
-        console.log('Reached end of video');
-        this.emit('bufferStatus', {
+        console.log("Reached end of video");
+        this.emit("bufferStatus", {
           health: this.metrics.bufferHealth,
           frameCount: this.frameBuffer.frames.size,
           capacity: this.frameBuffer.capacity,
-          endReached: true
+          endReached: true,
         });
         return;
       }
@@ -865,11 +1217,11 @@ private async processFeatures(features: FeatureData): Promise<any> {
       if (nextFrame < this.state.currentFrame + this.frameBuffer.capacity) {
         const frame = await this.ensureFrameLoaded(nextFrame);
         if (!frame) {
-          console.log('Failed to load next frame');
+          console.log("Failed to load next frame");
         }
       }
     } catch (error) {
-      console.warn('Buffer maintenance error:', error);
+      console.warn("Buffer maintenance error:", error);
     }
   }
 }
