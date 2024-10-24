@@ -184,48 +184,49 @@ class NeuralVideoCodec {
     }
   }
 
-  private async processWithFeatures(
-    frameIndex: number,
-    tokens: number[]
-  ): Promise<string> {
+  private async processWithFeatures(frameIndex: number, tokens: number[]): Promise<string> {
     if (!this.model || !this.state.videoId) {
       throw new Error("Model or video not initialized");
     }
-
+  
     const refFeatures = this.referenceFeatures.get(this.state.videoId);
     if (!refFeatures) {
       throw new Error("Reference features not loaded");
     }
-
+  
     try {
       const tf = await import("@tensorflow/tfjs");
-
-      // Convert tokens to tensor
-      const tokenTensor = tf
-        .tensor2d([tokens], [1, tokens.length])
-        .asType("float32");
-
-      // Convert reference features to tensors
+  
+      // Ensure tokens is a 2D array
+      const tokenArray = Array.isArray(tokens[0]) ? tokens : [tokens];
+      const tokenTensor = tf.tensor2d(tokenArray).asType("float32");
+  
+      // Convert reference features to tensors with proper shapes
       const referenceFeatures = refFeatures.map((feature, idx) => {
         const shapes = [
           [1, 128, 64, 64],
           [1, 256, 32, 32],
           [1, 512, 16, 16],
-          [1, 512, 8, 8],
+          [1, 512, 8, 8]
         ];
-        return tf.tensor(feature, shapes[idx]).asType("float32");
+        
+        if (!this.verifyShape(feature, shapes[idx])) {
+          throw new Error(`Reference feature ${idx} has incorrect shape. Expected ${shapes[idx]}, got ${this.getShape(feature)}`);
+        }
+        
+        return tf.tensor4d(feature, shapes[idx]).asType("float32");
       });
-
+  
       // Execute model
       const outputTensor: any = this.model.execute({
         "args_0:0": tokenTensor,
-        "args_0_1:0": tokenTensor, // Use same token for both inputs
+        "args_0_1:0": tokenTensor,
         args_0_2: referenceFeatures[0],
         args_0_3: referenceFeatures[1],
         args_0_4: referenceFeatures[2],
-        args_0_5: referenceFeatures[3],
+        args_0_5: referenceFeatures[3]
       });
-
+  
       // Process output tensor
       const processedTensor = tf.tidy(() => {
         let tensor = outputTensor;
@@ -235,21 +236,16 @@ class NeuralVideoCodec {
         tensor = tensor.squeeze([0]);
         return tf.clipByValue(tensor, 0, 1);
       });
-
+  
       // Convert to image
       const canvas = document.createElement("canvas");
       canvas.width = processedTensor.shape[1];
       canvas.height = processedTensor.shape[0];
       await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
-
+  
       // Cleanup
-      [
-        tokenTensor,
-        ...referenceFeatures,
-        outputTensor,
-        processedTensor,
-      ].forEach((t) => t.dispose());
-
+      [tokenTensor, ...referenceFeatures, outputTensor, processedTensor].forEach(t => t.dispose());
+  
       return canvas.toDataURL();
     } catch (error) {
       console.error("Error processing frame:", error);
@@ -496,7 +492,7 @@ class NeuralVideoCodec {
   /**
    * Process features received from server
    */
-  private async processFeatures(features: FeatureData): Promise<any> {
+  private async processFeatures(features: FeatureData): Promise<{ total: number }> {
     if (!this.model) {
       throw new Error('Model not initialized');
     }
@@ -506,106 +502,69 @@ class NeuralVideoCodec {
       total: 0
     };
   
+    const tensors: tfjs.Tensor[] = [];
     try {
       const tf = await import('@tensorflow/tfjs');
       
-      console.log('Processing features:', features);
-      
-      // Prepare current token tensor
+      // Ensure token shape is correct and create tensor
+      const tokenShape = [1, features.current_token.length];
       const currentToken = tf.tensor2d(
-        Array.isArray(features.current_token[0]) 
-          ? features.current_token 
-          : [features.current_token], 
-        [1, 32]
+        Array.isArray(features.current_token[0]) ? features.current_token : [features.current_token],
+        tokenShape
       ).asType('float32');
+      tensors.push(currentToken);
   
-      // Use the same token for reference
-      const referenceToken = currentToken;
-  
-      // Convert reference features with explicit shapes
+      // Process reference features with memory-efficient reshaping
       const referenceFeatures = features.reference_features.map((featureGroup, idx) => {
         const shapes = [[1, 128, 64, 64], [1, 256, 32, 32], [1, 512, 16, 16], [1, 512, 8, 8]];
-        const shape = shapes[idx];
+        const expectedShape = shapes[idx];
         
-        console.log(`Processing feature group ${idx}`);
-        console.log('Shape:', shape);
-        
-        // Get the feature data and ensure it's in the correct format
-        let featureData = featureGroup[0];
-        
-        // Check if we need to reshape the data
-        const totalElements = shape.reduce((a, b) => a * b);
-        if (Array.isArray(featureData) && !Array.isArray(featureData[0])) {
-          // Reshape flat array into proper dimensions
-          const temp = [];
-          let index = 0;
-          
-          // Create the 4D structure [1][channels][height][width]
-          for (let c = 0; c < shape[1]; c++) {
-            const channel = [];
-            for (let h = 0; h < shape[2]; h++) {
-              const row = [];
-              for (let w = 0; w < shape[3]; w++) {
-                row.push(featureData[index++]);
-              }
-              channel.push(row);
-            }
-            temp.push(channel);
-          }
-          featureData = [temp];
-        }
-  
-        // Verify the data shape before creating tensor
-        const verifyShape = (arr: any[], dims: number[]): boolean => {
-          if (dims.length === 0) return true;
-          if (!Array.isArray(arr)) return false;
-          if (arr.length !== dims[0]) return false;
-          if (dims.length === 1) return true;
-          return arr.every(item => verifyShape(item, dims.slice(1)));
-        };
-  
-        if (!verifyShape(featureData, shape)) {
-          console.error('Feature data shape mismatch:', {
-            expected: shape,
-            data: featureData
-          });
-          throw new Error(`Feature data shape mismatch for group ${idx}`);
-        }
-  
-        return tf.tensor(featureData, shape).asType('float32');
+        // Reshape data if needed
+        const reshapedData = this.reshapeFeatureData(featureGroup, expectedShape);
+        const tensor = tf.tensor4d(reshapedData, expectedShape).asType('float32');
+        tensors.push(tensor);
+        return tensor;
       });
   
-      console.log('Created reference feature tensors');
-  
-      // Execute model with all required inputs
-      const outputTensor = this.model.execute({
-        'args_0:0': currentToken,
-        'args_0_1:0': referenceToken,
-        'args_0_2': referenceFeatures[0],
-        'args_0_3': referenceFeatures[1],
-        'args_0_4': referenceFeatures[2],
-        'args_0_5': referenceFeatures[3]
+      // Execute model with proper garbage collection
+      const outputTensor = tf.tidy(() => {
+        const result = this.model!.execute({
+          'args_0:0': currentToken,
+          'args_0_1:0': currentToken,
+          'args_0_2': referenceFeatures[0],
+          'args_0_3': referenceFeatures[1],
+          'args_0_4': referenceFeatures[2],
+          'args_0_5': referenceFeatures[3]
+        });
+        tensors.push(result as tfjs.Tensor);
+        return result;
       });
   
-      if (!outputTensor) {
-        throw new Error('Model execution returned null');
-      }
-  
-      // Process output tensor
+      // Process output using tf.browser.draw for better performance
       const processedTensor = tf.tidy(() => {
-        let tensor = outputTensor;
+        let tensor = outputTensor as tfjs.Tensor;
         if (tensor.shape[1] === 3) {
           tensor = tf.transpose(tensor, [0, 2, 3, 1]);
         }
         tensor = tensor.squeeze([0]);
         return tf.clipByValue(tensor, 0, 1);
       });
+      tensors.push(processedTensor);
   
-      // Convert to image
+      // Create and setup canvas
       const canvas = document.createElement('canvas');
       canvas.width = processedTensor.shape[1];
       canvas.height = processedTensor.shape[0];
-      await tf.browser.toPixels(processedTensor as tfjs.Tensor3D, canvas);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        throw new Error('Failed to get canvas context');
+      }
+  
+      // Use tf.browser.draw instead of toPixels for better performance
+      await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas, {
+        multiplier: 1,
+        magnitude: 1
+      });
   
       // Emit processed frame
       this.emit('frameReady', {
@@ -613,24 +572,79 @@ class NeuralVideoCodec {
         imageUrl: canvas.toDataURL()
       });
   
-      // Cleanup
-      [currentToken, ...referenceFeatures, outputTensor, processedTensor].forEach(t => t.dispose());
-  
       timing.total = performance.now() - timing.start;
       return timing;
   
     } catch (error) {
       console.error('Error processing features:', error);
-      console.error('Feature data:', {
-        currentToken: features.current_token,
-        referenceFeatures: features.reference_features.map(f => ({
-          shape: Array.isArray(f[0]) ? f[0].length : 'unknown',
-          data: f[0]
-        }))
-      });
       throw error;
+    } finally {
+      // Ensure all tensors are properly disposed
+      tensors.forEach(tensor => {
+        if (tensor && !tensor.isDisposed) {
+          tensor.dispose();
+        }
+      });
     }
   }
+  
+  private reshapeFeatureData(data: number[] | number[][][] | number[][][][], targetShape: number[]): number[][][][] {
+    // Handle already correctly shaped data
+    if (this.verifyShape(data as any[], targetShape)) {
+      return data as number[][][][];
+    }
+  
+    const [batch, channels, height, width] = targetShape;
+    const flatData = Array.isArray(data[0]) ? (data as any).flat(3) : data;
+    
+    const result: number[][][][] = [];
+    let index = 0;
+    
+    // Create the 4D structure efficiently
+    for (let b = 0; b < batch; b++) {
+      const batchArray: number[][][] = [];
+      for (let c = 0; c < channels; c++) {
+        const channelArray: number[][] = [];
+        for (let h = 0; h < height; h++) {
+          const row: number[] = [];
+          for (let w = 0; w < width; w++) {
+            row.push(flatData[index++]);
+          }
+          channelArray.push(row);
+        }
+        batchArray.push(channelArray);
+      }
+      result.push(batchArray);
+    }
+    
+    return result;
+  }
+
+  private memoryCleanup(): void {
+    if (typeof window !== 'undefined' && (window as any).gc) {
+      (window as any).gc();
+    }
+    const tf = require('@tensorflow/tfjs');
+    tf.tidy(() => {}); // Force garbage collection of unused tensors
+    console.log('Memory cleaned up, tensor count:', tf.memory().numTensors);
+  }
+  
+  private verifyShape(data: any[], shape: number[]): boolean {
+    const actualShape = this.getShape(data);
+    if (actualShape.length !== shape.length) return false;
+    return actualShape.every((dim, i) => dim === shape[i]);
+  }
+  
+  private getShape(arr: any[]): number[] {
+    const shape = [];
+    let current = arr;
+    while (Array.isArray(current)) {
+      shape.push(current.length);
+      current = current[0];
+    }
+    return shape;
+  }
+
   
   // Update the token cache handling
   private async processWithCache(frameIndex: number): Promise<string> {
@@ -661,7 +675,7 @@ class NeuralVideoCodec {
         const shape = shapes[idx];
         
         // Handle nested array structure
-        let featureData = featureGroup[0];
+        let featureData:any = featureGroup[0];
         if (!Array.isArray(featureData[0])) {
           featureData = [featureData];
         }
@@ -733,17 +747,29 @@ class NeuralVideoCodec {
     try {
       const tf = await import("@tensorflow/tfjs");
       await import("@tensorflow/tfjs-backend-webgpu");
-
+  
+      // Configure WebGPU with appropriate buffer size limits
+      const webGPUConfig = {
+        devicePixelRatio: 1,
+        maxBufferSize: 4000000000, // ~4GB limit
+        preferredGPUDevice: 'discrete'
+      };
+  
       try {
         await tf.setBackend("webgpu");
         await tf.ready();
+        // Set WebGPU specific configurations
+        const backend = tf.backend() as any;
+        if (backend.setWebGPUDeviceConfig) {
+          backend.setWebGPUDeviceConfig(webGPUConfig);
+        }
         console.log("Using WebGPU backend");
       } catch (error: any) {
-        console.warn("WebGPU not available, falling back to WebGL");
+        console.warn("WebGPU not available, falling back to WebGL:", error);
         await tf.setBackend("webgl");
         await tf.ready();
       }
-
+  
       this.model = await tf.loadGraphModel(modelPath);
       console.log("Model loaded successfully");
     } catch (error: any) {
@@ -751,6 +777,7 @@ class NeuralVideoCodec {
       throw error;
     }
   }
+  
 
   private async runNeuralCodec(frameData: string): Promise<string> {
     if (!this.model) {
