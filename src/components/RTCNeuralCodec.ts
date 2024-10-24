@@ -237,133 +237,233 @@ abstract class BaseNeuralCodec {
   }
 
   public async processFrame(frameToken: FrameToken): Promise<void> {
+    // Early checks
     if (!this.model || !this.currentVideoId) {
-      throw new Error("Model or video not initialized");
+        throw new Error("Model or video not initialized");
     }
 
     const refData = this.referenceData.get(this.currentVideoId);
     if (!refData) {
-      throw new Error("Reference data not loaded");
+        throw new Error("Reference data not loaded");
     }
 
+    // Initialize tensors array at method start
+    const tensorsToDispose: tfjs.Tensor[] = [];
+
+    
+
     try {
-      const tf = await import("@tensorflow/tfjs");
-      const tensorsToDispose: tfjs.Tensor[] = [];
+        const tf = await import("@tensorflow/tfjs");
 
-      // Create token tensor
-      const currentToken = tf.tensor2d([frameToken.token]).asType("float32");
-      tensorsToDispose.push(currentToken);
-
-      // Execute model using pre-converted reference features
-      const outputTensor = tf.tidy(() => {
-        const result = this.model!.execute({
-          "args_0:0": currentToken,
-          "args_0_1:0": currentToken,
-          args_0_2: refData.features[0],
-          args_0_3: refData.features[1],
-          args_0_4: refData.features[2],
-          args_0_5: refData.features[3],
+        // Verify token shape before creating tensor
+        console.log("Token verification:", {
+            length: frameToken.token.length,
+            expectedLength: 32,
+            preview: Array.from(frameToken.token.slice(0, 5))
         });
-        tensorsToDispose.push(result as tfjs.Tensor);
-        return result;
-      });
 
-      // Process output tensor
-      const processedTensor = tf.tidy(() => {
-        let tensor = outputTensor as tfjs.Tensor;
-        if (tensor.shape[1] === 3) {
-          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+        if (frameToken.token.length !== 32) {
+            throw new Error(`Invalid token length: ${frameToken.token.length}, expected 32`);
         }
-        tensor = tensor.squeeze([0]);
-        return tf.clipByValue(tensor, 0, 1);
-      });
-      tensorsToDispose.push(processedTensor);
 
-      // Convert to image
-      const canvas = document.createElement("canvas");
-      canvas.width = processedTensor.shape[1];
-      canvas.height = processedTensor.shape[0];
+        // Create token tensor
+        const currentToken = tf.tensor2d([Array.from(frameToken.token)], [1, 32])
+            .asType("float32");
+        tensorsToDispose.push(currentToken);
 
-      await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
+        // Verify tensor creation
+        console.log("Created tensor:", {
+            shape: currentToken.shape,
+            dtype: currentToken.dtype,
+            dataPreview: Array.from(await currentToken.data()).slice(0, 5)
+        });
 
-      // Add to frame buffer
-      this.frameBuffer.frames.set(frameToken.frameIndex, {
-        timestamp: Date.now(),
-        data: canvas.toDataURL(),
-      });
+        // Debug log the token before creating tensor
+        console.log("Processing frame:", {
+            frameIndex: frameToken.frameIndex,
+            tokenLength: frameToken.token.length,
+            tokenPreview: Array.from(frameToken.token.slice(0, 5)),
+            expectedShape: [1, 32]
+        });
 
-      // Manage buffer size
-      if (this.frameBuffer.frames.size > this.frameBuffer.capacity) {
-        const oldestFrame = Math.min(...this.frameBuffer.frames.keys());
-        this.frameBuffer.frames.delete(oldestFrame);
-      }
 
-      // Emit frame ready event
-      this.emit("frameReady", {
-        frameIndex: frameToken.frameIndex,
-        imageUrl: canvas.toDataURL(),
-      });
+
+        // Debug log reference features
+        console.log("Reference features:", {
+            feature0Shape: refData.features[0].shape,
+            feature1Shape: refData.features[1].shape,
+            feature2Shape: refData.features[2].shape,
+            feature3Shape: refData.features[3].shape
+        });
+
+        // Execute model using pre-converted reference features
+        const outputTensor = tf.tidy(() => {
+            try {
+                const inputDict = {
+                    "args_0:0": currentToken,
+                    "args_0_1:0": currentToken,
+                    args_0_2: refData.features[0],
+                    args_0_3: refData.features[1],
+                    args_0_4: refData.features[2],
+                    args_0_5: refData.features[3],
+                };
+
+                // Debug log input shapes
+                console.log("Model inputs:", {
+                    args_0_shape: inputDict["args_0:0"].shape,
+                    args_0_1_shape: inputDict["args_0_1:0"].shape,
+                    args_0_2_shape: inputDict.args_0_2.shape,
+                    args_0_3_shape: inputDict.args_0_3.shape,
+                    args_0_4_shape: inputDict.args_0_4.shape,
+                    args_0_5_shape: inputDict.args_0_5.shape,
+                });
+
+                const result = this.model!.execute(inputDict);
+                tensorsToDispose.push(result as tfjs.Tensor);
+                return result;
+            } catch (execError) {
+                console.error("Model execution error:", execError);
+                console.error("Model info:", {
+                    inputSignature: this.model!.inputs.map(i => ({
+                        name: i.name,
+                        shape: i.shape
+                    })),
+                    outputSignature: this.model!.outputs.map(o => ({
+                        name: o.name,
+                        shape: o.shape
+                    }))
+                });
+                throw execError;
+            }
+        });
+
+        // Debug log the output tensor
+        console.log("Model output:", {
+            shape: outputTensor.shape,
+            dtype: outputTensor.dtype
+        });
+
+        // Process output tensor
+        const processedTensor = tf.tidy(() => {
+            let tensor = outputTensor as tfjs.Tensor;
+            if (tensor.shape[1] === 3) {
+                tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+            }
+            tensor = tensor.squeeze([0]);
+            return tf.clipByValue(tensor, 0, 1);
+        });
+        tensorsToDispose.push(processedTensor);
+
+        // Debug log final processed tensor
+        console.log("Processed output:", {
+            shape: processedTensor.shape,
+            dtype: processedTensor.dtype
+        });
+
+        // Convert to image
+        const canvas = document.createElement("canvas");
+        canvas.width = processedTensor.shape[1];
+        canvas.height = processedTensor.shape[0];
+
+        await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
+
+        // Add to frame buffer
+        this.frameBuffer.frames.set(frameToken.frameIndex, {
+            timestamp: Date.now(),
+            data: canvas.toDataURL(),
+        });
+
+        // Manage buffer size
+        if (this.frameBuffer.frames.size > this.frameBuffer.capacity) {
+            const oldestFrame = Math.min(...this.frameBuffer.frames.keys());
+            this.frameBuffer.frames.delete(oldestFrame);
+        }
+
+        // Emit frame ready event
+        this.emit("frameReady", {
+            frameIndex: frameToken.frameIndex,
+            imageUrl: canvas.toDataURL(),
+        });
+
     } catch (error) {
-      console.error("Error processing frame:", error);
-      throw error;
+        console.error("Error processing frame:", error);
+        console.error("Token details at error:", {
+            frameIndex: frameToken.frameIndex,
+            tokenLength: frameToken.token.length,
+            tokenPreview: Array.from(frameToken.token.slice(0, 5))
+        });
+        throw error;
     } finally {
-      // No need to dispose reference features as they're kept in memory
-      tfjs.dispose(tensorsToDispose);
+        // Clean up tensors
+        console.log(`Cleaning up ${tensorsToDispose.length} tensors`);
+        tensorsToDispose.forEach(tensor => {
+            if (tensor && !tensor.isDisposed) {
+                tensor.dispose();
+            }
+        });
     }
-  }
+}
 
-  public async loadReferenceData(videoId: number): Promise<void> {
+public async loadReferenceData(videoId: number): Promise<void> {
     try {
-      const response = await fetch(
-        `https://192.168.1.108:8000/videos/${videoId}/reference`,
-        {
-          credentials: "same-origin",
-          headers: {
-            Accept: "application/json",
-          },
-        }
-      );
-
-      if (!response.ok) {
-        throw new Error(
-          `Failed to fetch reference data: ${response.statusText}`
+        const response = await fetch(
+            `https://192.168.1.108:8000/videos/${videoId}/reference`,
+            {
+                credentials: "same-origin",
+                headers: {
+                    Accept: "application/json",
+                },
+            }
         );
-      }
 
-      const data = await response.json();
-      const tf = await import("@tensorflow/tfjs");
-
-      // Define shapes once
-      const shapes = [
-        [1, 128, 64, 64],
-        [1, 256, 32, 32],
-        [1, 512, 16, 16],
-        [1, 512, 8, 8],
-      ];
-
-      // Convert features to tensors once
-      const featureTensors = data.reference_features.map(
-        (feature: number[][][], idx: number) => {
-          return tf.tensor4d(feature, shapes[idx]).asType("float32");
+        if (!response.ok) {
+            throw new Error(`Failed to fetch reference data: ${response.statusText}`);
         }
-      );
 
-      // Store the prepared tensors
-      this.referenceData.set(videoId, {
-        features: featureTensors,
-        token: data.reference_token,
-        shapes,
-      });
+        const data = await response.json();
+        
+        // Debug log the received reference data
+        console.log("Received reference data:", {
+            dataShapes: data.shapes,
+            tokenLength: data.reference_token.length,
+            tokenPreview: data.reference_token.slice(0, 5),
+            featureShapes: data.reference_features.map((f: any[]) => 
+                `[${f.length}, ${f[0].length}, ${f[0][0].length}, ${f[0][0][0].length}]`
+            )
+        });
 
-      console.log(
-        `Reference features converted to tensors for video ${videoId}`
-      );
+        const tf = await import("@tensorflow/tfjs");
+        const shapes = [
+            [1, 128, 64, 64],
+            [1, 256, 32, 32],
+            [1, 512, 16, 16],
+            [1, 512, 8, 8],
+        ];
+
+        const featureTensors = data.reference_features.map(
+            (feature: number[][][], idx: number) => {
+                const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
+                console.log(`Feature tensor ${idx}:`, {
+                    shape: tensor.shape,
+                    dtype: tensor.dtype
+                });
+                return tensor;
+            }
+        );
+
+        this.referenceData.set(videoId, {
+            features: featureTensors,
+            token: data.reference_token,
+            shapes,
+        });
+
+        console.log(`Reference data loaded for video ${videoId}`);
     } catch (error) {
-      console.error("Error loading reference data:", error);
-      this.cleanupReferenceTensors(videoId);
-      throw error;
+        console.error("Error loading reference data:", error);
+        this.cleanupReferenceTensors(videoId);
+        throw error;
     }
-  }
+}
 
   private cleanupReferenceTensors(videoId: number): void {
     const refData = this.referenceData.get(videoId);
@@ -450,28 +550,66 @@ class RTCNeuralCodec extends BaseNeuralCodec {
 
   private async handleFrameToken(message: any) {
     const { frameIndex, token } = message;
+    
+    // Debug log the incoming token data
+    console.log("Received frame token:", {
+        frameIndex,
+        tokenShape: token.length,
+        tokenPreview: token.slice(0, 5),
+        tokenType: typeof token,
+        isArray: Array.isArray(token),
+        fullToken: token // temporary for debugging
+    });
+
+    // Flatten nested arrays if needed
+    let flatToken: number[];
+    if (Array.isArray(token[0]) && Array.isArray(token[0][0])) {
+        // Double nested array
+        flatToken = token[0];
+    } else if (Array.isArray(token[0])) {
+        // Single nested array
+        flatToken = token[0];
+    } else {
+        // Already flat
+        flatToken = token;
+    }
+
+    console.log("Flattened token:", {
+        length: flatToken.length,
+        preview: flatToken.slice(0, 5),
+        isArray: Array.isArray(flatToken)
+    });
 
     try {
-      // Process frame and add to processing queue
-      const processPromise = this.processFrame({
-        frameIndex,
-        token: new Float32Array(token),
-      });
+        // Process frame and add to processing queue
+        const processPromise = this.processFrame({
+            frameIndex,
+            token: new Float32Array(flatToken)
+        });
 
-      this.processingQueue.set(frameIndex, processPromise);
+        this.processingQueue.set(frameIndex, processPromise);
 
-      // Clean up queue after processing
-      await processPromise;
-      this.processingQueue.delete(frameIndex);
+        // Clean up queue after processing
+        await processPromise;
+        this.processingQueue.delete(frameIndex);
     } catch (error) {
-      console.error("Frame processing error:", error);
-      this.metrics.droppedFrames++;
-      this.emit("error", {
-        message: "Frame processing failed",
-        error,
-      });
+        console.error("Frame processing error:", error);
+        console.error("Token state at error:", {
+            original: token,
+            flattened: flatToken,
+            lengths: {
+                original: token.length,
+                flattened: flatToken.length
+            }
+        });
+        this.metrics.droppedFrames++;
+        this.emit("error", {
+            message: "Frame processing failed",
+            error,
+        });
     }
-  }
+}
+
 
   private setupAudioElement() {
     // Sync frame processing with audio timing
