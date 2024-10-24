@@ -143,6 +143,13 @@ useEffect(() => {
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
+        codecRef.current.on('error', (error) => {
+          if (error.code === 'MAX_RETRIES_EXCEEDED') {
+            console.error('Connection failed permanently after max retries');
+            // Handle permanent failure (e.g., show user message)
+          }
+        });
+
         // Listen for end of video
         codecRef.current.on('bufferStatus', (status) => {
           if (status.endReached) {

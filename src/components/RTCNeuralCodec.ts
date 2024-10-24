@@ -312,7 +312,6 @@ abstract class BaseNeuralCodec {
     }
   }
 
-
   public async loadReferenceData(videoId: number): Promise<void> {
     try {
       const response = await fetch(
@@ -392,14 +391,30 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     "new";
   private reconnectAttempts = 0;
   private readonly MAX_RECONNECT_ATTEMPTS = 5;
-  private readonly RECONNECT_INTERVAL = 5000;
 
+  private readonly MAX_RETRY_ATTEMPTS = 5;
+  private readonly INITIAL_RETRY_DELAY = 1000; // 1 second
+  private readonly MAX_RETRY_DELAY = 30000; // 30 seconds
+  private retryCount = 0;
+  private retryTimeout: NodeJS.Timeout | null = null;
+  private isReconnecting = false;
   constructor(config: RTCConfig) {
     super(config);
     this.audioElement = new Audio();
     this.audioElement.autoplay = true;
     this.setupAudioElement();
   }
+
+  private getRetryDelay(): number {
+        // Exponential backoff with jitter
+        const exponentialDelay = Math.min(
+            this.INITIAL_RETRY_DELAY * Math.pow(2, this.retryCount),
+            this.MAX_RETRY_DELAY
+        );
+        // Add random jitter (±20%)
+        const jitter = exponentialDelay * 0.2 * (Math.random() * 2 - 1);
+        return exponentialDelay + jitter;
+    }
 
   private async setupWebRTC(config: RTCConfiguration): Promise<void> {
     this.peerConnection = new RTCPeerConnection(config);
@@ -516,21 +531,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     this.reconnect();
   }
 
-  private async reconnect(): Promise<void> {
-    try {
-      if (this.signalingWs?.readyState === WebSocket.CLOSED) {
-        await this.connect(this.signalingWs.url);
-
-        // Resume playback if needed
-        if (this.currentVideoId !== null) {
-          await this.startPlayback(this.currentVideoId);
-        }
-      }
-    } catch (error) {
-      console.error("Reconnection failed:", error);
-      setTimeout(() => this.reconnect(), 5000);
-    }
-  }
+  
 
   private async handleSignalingMessage(event: MessageEvent): Promise<void> {
     if (!this.signalingWs || this.signalingWs.readyState !== WebSocket.OPEN) {
@@ -546,12 +547,12 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       return;
     }
 
-    console.log("message:",message)
+    console.log("message:", message);
     try {
       switch (message.type) {
         case "init_response":
-            await this.createAndSendOffer();
-            break;
+          await this.createAndSendOffer();
+          break;
 
         case "offer":
           await this.handleOffer(message.payload.sdp);
@@ -638,11 +639,9 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-
   private async handleInitResponse(payload: any): Promise<void> {
     try {
-
-        console.log("payload:",payload)
+      console.log("payload:", payload);
       // Setup WebRTC with received configuration
       await this.setupWebRTC(payload.rtcConfig);
 
@@ -670,40 +669,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  private handleSignalingError(error: {
-    message: string;
-    code?: number;
-  }): void {
-    console.error("Signaling error:", error);
-
-    // Handle specific error codes
-    switch (error.code) {
-      case 1000: // Normal closure
-        this.handleDisconnect();
-        break;
-
-      case 1001: // Going away
-        this.reconnect();
-        break;
-
-      case 1006: // Abnormal closure
-        if (this.reconnectAttempts < this.MAX_RECONNECT_ATTEMPTS) {
-          this.reconnect();
-        } else {
-          this.emit("error", {
-            message: "Failed to maintain signaling connection",
-            error,
-          });
-        }
-        break;
-
-      default:
-        this.emit("error", {
-          message: error.message,
-          error,
-        });
-    }
-  }
 
   private async handleConnectionRestart(): Promise<void> {
     try {
@@ -731,265 +696,395 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  private async cleanup(): Promise<void> {
-    try {
-        // Close data channel first
-        if (this.dataChannel) {
-            console.log('Closing data channel...');
-            this.dataChannel.onopen = null;
-            this.dataChannel.onclose = null;
-            this.dataChannel.onmessage = null;
-            this.dataChannel.close();
-            this.dataChannel = null;
-        }
 
-        // Close peer connection and clean up its event listeners
-        if (this.peerConnection) {
-            console.log('Closing peer connection...');
-            this.peerConnection.onicecandidate = null;
-            this.peerConnection.oniceconnectionstatechange = null;
-            this.peerConnection.ontrack = null;
-            this.peerConnection.close();
-            this.peerConnection = null;
-        }
-
-        // Close WebSocket connection
-        if (this.signalingWs) {
-            console.log('Closing signaling WebSocket...');
-            this.signalingWs.onopen = null;
-            this.signalingWs.onclose = null;
-            this.signalingWs.onerror = null;
-            this.signalingWs.onmessage = null;
-            
-            if (this.signalingWs.readyState === WebSocket.OPEN) {
-                this.signalingWs.close(1000, 'Cleanup');
-            }
-            this.signalingWs = null;
-        }
-
-        // Clear pending candidates
-        this.pendingCandidates = [];
-
-        // Stop audio
-        if (this.audioElement) {
-            this.audioElement.pause();
-            this.audioElement.srcObject = null;
-        }
-
-        // Clear processing queue
-        this.processingQueue.clear();
-
-        // Reset connection state
-        this.connectionState = 'new';
-        this.reconnectAttempts = 0;
-
-        // Clean up any remaining reference tensors
-        if (this.currentVideoId !== null) {
-            await this.cleanupReferenceTensors(this.currentVideoId);
-            this.currentVideoId = null;
-        }
-
-        console.log('Cleanup completed successfully');
-    } catch (error) {
-        console.error('Error during cleanup:', error);
-        // Even if there's an error, we want to ensure everything is reset
-        this.dataChannel = null;
-        this.peerConnection = null;
-        this.signalingWs = null;
-        this.connectionState = 'new';
-        this.currentVideoId = null;
-        throw error;
-    }
-}
-
-// Helper method to ensure cleanup completes
-private async ensureCleanup(): Promise<void> {
+  // Helper method to ensure cleanup completes
+  private async ensureCleanup(): Promise<void> {
     let cleanupAttempts = 0;
     const maxAttempts = 3;
-    
+
     while (cleanupAttempts < maxAttempts) {
-        try {
-            await this.cleanup();
-            break;
-        } catch (error) {
-            cleanupAttempts++;
-            console.error(`Cleanup attempt ${cleanupAttempts} failed:`, error);
-            
-            if (cleanupAttempts === maxAttempts) {
-                console.error('Max cleanup attempts reached, forcing reset');
-                // Force reset of all connections
-                this.dataChannel = null;
-                this.peerConnection = null;
-                this.signalingWs = null;
-                this.connectionState = 'new';
-                this.currentVideoId = null;
-                throw new Error('Cleanup failed after maximum attempts');
-            }
-            
-            // Wait before retrying
-            await new Promise(resolve => setTimeout(resolve, 1000));
+      try {
+        await this.cleanup();
+        break;
+      } catch (error) {
+        cleanupAttempts++;
+        console.error(`Cleanup attempt ${cleanupAttempts} failed:`, error);
+
+        if (cleanupAttempts === maxAttempts) {
+          console.error("Max cleanup attempts reached, forcing reset");
+          // Force reset of all connections
+          this.dataChannel = null;
+          this.peerConnection = null;
+          this.signalingWs = null;
+          this.connectionState = "new";
+          this.currentVideoId = null;
+          throw new Error("Cleanup failed after maximum attempts");
         }
+
+        // Wait before retrying
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
     }
-}
+  }
 
   public async connect(signalingUrl: string): Promise<void> {
     try {
-        // Clean up any existing connections
-        await this.ensureCleanup();
+      // Reset retry count on new connection attempt
+      this.retryCount = 0;
+      await this.ensureCleanup();
 
-        // Create WebSocket connection
-        this.signalingWs = new WebSocket(signalingUrl);
-        
-        return new Promise((resolve, reject) => {
-            if (!this.signalingWs) return reject(new Error('No WebSocket connection'));
+      this.signalingWs = new WebSocket(signalingUrl);
 
-            const timeout = setTimeout(() => {
-                reject(new Error('Connection timeout'));
-            }, 10000);
+      return new Promise((resolve, reject) => {
+        if (!this.signalingWs)
+          return reject(new Error("No WebSocket connection"));
 
-            this.signalingWs.onopen = () => {
-                clearTimeout(timeout);
-                this.initializeSignaling().then(resolve).catch(reject);
-            };
+        const timeout = setTimeout(() => {
+          this.handleConnectionTimeout(reject);
+        }, 10000);
 
-            this.signalingWs.onerror = (error) => {
-                clearTimeout(timeout);
-                reject(error);
-            };
+        this.signalingWs.onopen = () => {
+          clearTimeout(timeout);
+          this.retryCount = 0; // Reset retry count on successful connection
+          this.isReconnecting = false;
+          this.initializeSignaling().then(resolve).catch(reject);
+        };
 
-            this.signalingWs.onmessage = this.handleSignalingMessage.bind(this);
-            this.signalingWs.onclose = this.handleWebSocketClose.bind(this);
-        });
+        this.signalingWs.onerror = (error) => {
+          clearTimeout(timeout);
+          this.handleConnectionError(error, reject);
+        };
 
+        this.signalingWs.onmessage = this.handleSignalingMessage.bind(this);
+        this.signalingWs.onclose = this.handleWebSocketClose.bind(this);
+      });
     } catch (error) {
-        console.error('Connection failed:', error);
-        this.emit('error', { message: 'Connection failed', error });
-        throw error;
+      console.error("Connection failed:", error);
+      this.emit("error", { message: "Connection failed", error });
+      throw error;
     }
-}
+  }
 
-private async initializeSignaling(): Promise<void> {
-    if (!this.signalingWs) throw new Error('No signaling connection');
+  private async handleConnectionTimeout(
+    reject: (reason?: any) => void
+  ): Promise<void> {
+    console.error("Connection timeout");
+    if (this.signalingWs) {
+      this.signalingWs.close();
+    }
+    reject(new Error("Connection timeout"));
+    await this.handleReconnect();
+  }
+
+  private async handleConnectionError(
+    error: Event,
+    reject: (reason?: any) => void
+  ): Promise<void> {
+    console.error("WebSocket error:", error);
+    reject(error);
+    await this.handleReconnect();
+  }
+
+  private async handleReconnect(): Promise<void> {
+    if (this.isReconnecting || this.retryCount >= this.MAX_RETRY_ATTEMPTS) {
+      if (this.retryCount >= this.MAX_RETRY_ATTEMPTS) {
+        console.error("Max retry attempts reached");
+        this.emit("error", {
+          message: "Failed to establish connection after maximum retries",
+          code: "MAX_RETRIES_EXCEEDED",
+        });
+      }
+      return;
+    }
+
+    this.isReconnecting = true;
+    this.retryCount++;
+
+    const delay = this.getRetryDelay();
+    console.log(
+      `Attempting reconnection ${this.retryCount}/${this.MAX_RETRY_ATTEMPTS} in ${delay}ms`
+    );
+
+    // Clear any existing retry timeout
+    if (this.retryTimeout) {
+      clearTimeout(this.retryTimeout);
+    }
+
+    // Schedule retry
+    this.retryTimeout = setTimeout(async () => {
+      try {
+        await this.reconnect();
+      } catch (error) {
+        console.error("Reconnection attempt failed:", error);
+        // Continue retry cycle if we haven't reached max attempts
+        if (this.retryCount < this.MAX_RETRY_ATTEMPTS) {
+          await this.handleReconnect();
+        }
+      } finally {
+        this.isReconnecting = false;
+      }
+    }, delay);
+  }
+
+  private async reconnect(): Promise<void> {
+    try {
+      if (this.signalingWs?.readyState === WebSocket.CLOSED) {
+        console.log(`Reconnection attempt ${this.retryCount}`);
+        await this.connect(this.signalingWs.url);
+
+        // Restore playback if needed
+        if (this.currentVideoId !== null) {
+          await this.startPlayback(this.currentVideoId);
+        }
+      }
+    } catch (error) {
+      console.error("Reconnection failed:", error);
+      throw error;
+    }
+  }
+
+  private handleWebSocketClose(event: CloseEvent): void {
+    console.log("WebSocket closed:", event.code, event.reason);
+
+    // Don't attempt reconnection for normal closure
+    if (event.code !== 1000) {
+      this.handleSignalingError({
+        message: "WebSocket connection closed",
+        code: event.code,
+      });
+    }
+  }
+
+  private handleSignalingError(error: {
+    message: string;
+    code?: number;
+  }): void {
+    console.error("Signaling error:", error);
+
+    switch (error.code) {
+      case 1000: // Normal closure
+        // No reconnection needed
+        break;
+
+      case 1006: // Abnormal closure
+      case 1001: // Going away
+        this.handleReconnect();
+        break;
+
+      default:
+        this.emit("error", {
+          message: error.message,
+          error,
+        });
+        if (this.retryCount < this.MAX_RETRY_ATTEMPTS) {
+          this.handleReconnect();
+        }
+    }
+  }
+
+  public  async cleanup(): Promise<void> {
+    // Clear any pending retry timeout
+    if (this.retryTimeout) {
+      clearTimeout(this.retryTimeout);
+      this.retryTimeout = null;
+    }
+
+    // Reset connection state
+    this.isReconnecting = false;
+    this.retryCount = 0;
+
+    // Clean up existing connections
+    if (this.dataChannel) {
+      this.dataChannel.onopen = null;
+      this.dataChannel.onclose = null;
+      this.dataChannel.onmessage = null;
+      this.dataChannel.close();
+      this.dataChannel = null;
+    }
+
+    if (this.peerConnection) {
+      this.peerConnection.onicecandidate = null;
+      this.peerConnection.oniceconnectionstatechange = null;
+      this.peerConnection.ontrack = null;
+      this.peerConnection.close();
+      this.peerConnection = null;
+    }
+
+    if (this.signalingWs) {
+      this.signalingWs.onopen = null;
+      this.signalingWs.onclose = null;
+      this.signalingWs.onerror = null;
+      this.signalingWs.onmessage = null;
+
+      if (this.signalingWs.readyState === WebSocket.OPEN) {
+        this.signalingWs.close(1000, "Cleanup");
+      }
+      this.signalingWs = null;
+    }
+
+    // Clean up audio
+    if (this.audioElement) {
+      this.audioElement.pause();
+      this.audioElement.srcObject = null;
+    }
+
+    // Clear processing queue
+    this.processingQueue.clear();
+
+    console.log("Cleanup completed successfully");
+  }
+  private async initializeSignaling(): Promise<void> {
+    if (!this.signalingWs) throw new Error("No signaling connection");
 
     // Create new RTCPeerConnection
     this.peerConnection = new RTCPeerConnection({
-        iceServers: this.config.iceServers
+      iceServers: this.config.iceServers,
     });
 
     // Set up ICE candidate handling
     this.peerConnection.onicecandidate = (event) => {
-        if (event.candidate) {
-            this.sendSignalingMessage({
-                type: 'ice-candidate',
-                payload: {
-                    candidate: event.candidate.toJSON()
-                }
-            });
-        }
+      if (event.candidate) {
+        this.sendSignalingMessage({
+          type: "ice-candidate",
+          payload: {
+            candidate: {
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex,
+              usernameFragment: event.candidate.usernameFragment,
+            },
+          },
+        });
+      }
     };
 
     // Send initialization message
     this.sendSignalingMessage({
-        type: 'init',
-        payload: {
-            fps: this.config.fps,
-            rtcConfig: {
-                iceServers: this.config.iceServers
-            }
-        }
+      type: "init",
+      payload: {
+        fps: this.config.fps,
+        rtcConfig: {
+          iceServers: this.config.iceServers,
+        },
+      },
     });
 
     // Create data channel
-    this.dataChannel = this.peerConnection.createDataChannel('frames', {
-        ordered: true,
-        maxRetransmits: 1
+    this.dataChannel = this.peerConnection.createDataChannel("frames", {
+      ordered: true,
+      maxRetransmits: 1,
     });
 
+    // Set up connection monitoring
+    this.peerConnection.onconnectionstatechange = () => {
+      console.log("Connection state:", this.peerConnection?.connectionState);
+      if (this.peerConnection?.connectionState === "failed") {
+        this.handleConnectionFailure();
+      }
+    };
+
+    this.peerConnection.oniceconnectionstatechange = () => {
+      console.log(
+        "ICE connection state:",
+        this.peerConnection?.iceConnectionState
+      );
+      if (this.peerConnection?.iceConnectionState === "failed") {
+        this.handleICEFailure();
+      }
+    };
+
     this.setupDataChannel();
-}
+  }
 
+  private async handleConnectionFailure(): Promise<void> {
+    console.error("Connection failed, attempting reconnect...");
+    await this.cleanup();
+    await this.connect(this.config.serverUrl);
+  }
 
-private async createAndSendOffer(): Promise<void> {
-    if (!this.peerConnection) throw new Error('No peer connection');
+  private async handleICEFailure(): Promise<void> {
+    console.error("ICE connection failed, attempting restart...");
+    if (this.peerConnection) {
+      await this.peerConnection.restartIce();
+    }
+  }
+
+  private async createAndSendOffer(): Promise<void> {
+    if (!this.peerConnection) throw new Error("No peer connection");
 
     try {
-        const offer = await this.peerConnection.createOffer({
-            offerToReceiveAudio: true,
-            offerToReceiveVideo: false
-        });
+      const offer = await this.peerConnection.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false,
+      });
 
-        await this.peerConnection.setLocalDescription(offer);
+      await this.peerConnection.setLocalDescription(offer);
 
-        this.sendSignalingMessage({
-            type: 'offer',
-            payload: {
-                sdp: offer
-            }
-        });
+      this.sendSignalingMessage({
+        type: "offer",
+        payload: {
+          sdp: offer,
+        },
+      });
     } catch (error) {
-        console.error('Error creating offer:', error);
-        throw error;
+      console.error("Error creating offer:", error);
+      throw error;
     }
-}
+  }
 
-private async handleAnswer(sdp: RTCSessionDescriptionInit): Promise<void> {
-    if (!this.peerConnection) throw new Error('No peer connection');
+  private async handleAnswer(sdp: RTCSessionDescriptionInit): Promise<void> {
+    if (!this.peerConnection) throw new Error("No peer connection");
 
     try {
-        await this.peerConnection.setRemoteDescription(new RTCSessionDescription(sdp));
-        console.log('Remote description set successfully');
+      await this.peerConnection.setRemoteDescription(
+        new RTCSessionDescription(sdp)
+      );
+      console.log("Remote description set successfully");
     } catch (error) {
-        console.error('Error setting remote description:', error);
-        throw error;
+      console.error("Error setting remote description:", error);
+      throw error;
     }
-}
+  }
 
-private async handleIceCandidate(candidate: RTCIceCandidateInit): Promise<void> {
-    if (!this.peerConnection) throw new Error('No peer connection');
+  private async handleIceCandidate(
+    candidate: RTCIceCandidateInit
+  ): Promise<void> {
+    if (!this.peerConnection) throw new Error("No peer connection");
 
     try {
-        await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
+      await this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate));
     } catch (error) {
-        console.error('Error adding ICE candidate:', error);
-        throw error;
+      console.error("Error adding ICE candidate:", error);
+      throw error;
     }
-}
+  }
 
-private setupDataChannel(): void {
+  private setupDataChannel(): void {
     if (!this.dataChannel) return;
 
     this.dataChannel.onopen = () => {
-        console.log('Data channel opened');
-        this.connectionState = 'connected';
-        this.emit('connectionState', { state: 'connected' });
+      console.log("Data channel opened");
+      this.connectionState = "connected";
+      this.emit("connectionState", { state: "connected" });
     };
 
     this.dataChannel.onclose = () => {
-        console.log('Data channel closed');
-        this.connectionState = 'failed';
-        this.emit('connectionState', { state: 'disconnected' });
+      console.log("Data channel closed");
+      this.connectionState = "failed";
+      this.emit("connectionState", { state: "disconnected" });
     };
 
     this.dataChannel.onmessage = async (event) => {
-        try {
-            const message = JSON.parse(event.data);
-            if (message.type === 'frame_token') {
-                await this.handleFrameToken(message);
-            }
-        } catch (error) {
-            console.error('Error handling data channel message:', error);
+      try {
+        const message = JSON.parse(event.data);
+        if (message.type === "frame_token") {
+          await this.handleFrameToken(message);
         }
+      } catch (error) {
+        console.error("Error handling data channel message:", error);
+      }
     };
+  }
 }
 
-private handleWebSocketClose(event: CloseEvent): void {
-    console.log('WebSocket closed:', event.code, event.reason);
-    this.handleSignalingError({
-        message: 'WebSocket connection closed',
-        code: event.code
-    });
-}
-}
-
-
-export default RTCNeuralCodec
+export default RTCNeuralCodec;
