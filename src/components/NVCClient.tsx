@@ -43,8 +43,9 @@ const globalInitState = {
   hasInitialized: false
 };
 
-type LoadingPhase = 'init' | 'model' | 'connection' | 'videos' | 'ready';
 
+
+type InitPhase = 'idle' | 'model' | 'connection' | 'videos' | 'complete' | 'error';
 
 const NVCClient = () => {
   const [status, setStatus] = useState<string>("Initializing...");
@@ -87,35 +88,36 @@ const NVCClient = () => {
   const mountedRef = useRef(true);
 
   // Add state for tracking loading phase
-  const [currentPhase, setCurrentPhase] = useState<LoadingPhase>('init');
   const [modelProgress, setModelProgress] = useState(0);
+  const [initPhase, setInitPhase] = useState<InitPhase>('idle');
+
+   // Helper function to check if system is ready
+   const isSystemReady = useCallback(() => {
+    return initPhase === 'complete';
+  }, [initPhase]);
 
   // Add useEffect to manage ready state
-useEffect(() => {
-  // Consider the app ready when:
-  // 1. Model is loaded
-  // 2. Connection is established
-  // 3. Videos are fetched
-  // 4. Not currently showing progress
-  const checkReady = () => {
-    const ready = isModelLoaded && 
-                 isConnected && 
-                 videos.length > 0 && 
-                 !showProgress;
-    
-    console.log('Checking ready state:', {
-      isModelLoaded,
-      isConnected,
-      hasVideos: videos.length > 0,
-      showProgress,
-      ready
-    });
-    
-    setIsReady(ready);
-  };
+  useEffect(() => {
+    const checkReady = () => {
+      const ready = isModelLoaded && 
+                   isConnected && 
+                   videos.length > 0 && 
+                   !showProgress;
+      
+      console.log('Checking ready state:', {
+        isModelLoaded,
+        isConnected,
+        hasVideos: videos.length > 0,
+        showProgress,
+        ready,
+       
+      });
+      
+      setIsReady(ready);
+    };
 
-  checkReady();
-}, [isModelLoaded, isConnected, videos, showProgress]);
+    checkReady();
+  }, [isModelLoaded, isConnected, videos, showProgress, initPhase]);
 
   // Add a useEffect to handle codec events
   useEffect(() => {
@@ -131,13 +133,10 @@ useEffect(() => {
         setIsLoading(false);
       });
 
-      // Enhanced buffer status handler for model loading progress
       codecRef.current.on('bufferStatus', (status) => {
-        if (mountedRef.current && currentPhase === 'model') {
-          const progressValue = status.health / 100;
-          setModelProgress(progressValue);
-          setProgress(progressValue); // Update main progress bar
-          console.log(`Model loading progress: ${status.health}%`);
+        if (mountedRef.current && status.type === 'model') {
+          setModelProgress(status.health / 100);
+          setProgress(status.health / 100);
         }
       });
 
@@ -159,7 +158,6 @@ const cleanupInProgressRef = useRef(false);
 // Consolidated initialization useEffect
 useEffect(() => {
   const initCodec = async () => {
-    // Check global initialization state
     if (globalInitState.isInitializing || globalInitState.hasInitialized) {
       console.log('Initialization already in progress or completed, skipping...');
       return;
@@ -169,11 +167,10 @@ useEffect(() => {
     console.log('Starting fresh initialization...');
 
     try {
-      if (mountedRef.current) {
-        setShowProgress(true);
-        setProgressMessage('Initializing codec...');
-        setProgress(0);
-      }
+      setShowProgress(true);
+      setProgressMessage('Initializing codec...');
+      setProgress(0);
+      setInitPhase('model');
 
       // Create codec instance
       codecRef.current = new RTCNeuralCodec({
@@ -182,7 +179,7 @@ useEffect(() => {
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
       });
 
-      // Set up event listeners
+      // Set up event listeners with phase tracking
       codecRef.current.on('frameReady', (data) => {
         if (mountedRef.current) {
           setReconstructedImage(data.imageUrl);
@@ -194,52 +191,49 @@ useEffect(() => {
         if (mountedRef.current) {
           setError(error.message);
           setShowProgress(false);
+          setInitPhase('idle');
         }
       });
 
       codecRef.current.on('bufferStatus', (status) => {
-        if (mountedRef.current) {
+        if (mountedRef.current && status.type === 'model') {
+          setModelProgress(status.health / 100);
           setProgress(status.health / 100);
         }
       });
 
-      // Initialize model
-      if (mountedRef.current) setProgressMessage('Loading neural codec model...');
+      // Initialize model with phase tracking
+      setProgressMessage('Loading neural codec model...');
       await codecRef.current.initModel('/graph_model_client/model.json');
-      if (mountedRef.current) {
-        setIsModelLoaded(true);
-        setProgressMessage('Model loaded, establishing connection...');
-      }
+      setIsModelLoaded(true);
+      setInitPhase('connection');
+      setProgressMessage('Model loaded, establishing connection...');
 
-      // Connect
-      if (mountedRef.current) setProgressMessage('Establishing connection...');
+      // Connect with phase tracking
       await codecRef.current.connect('wss://192.168.1.108:8000/rtc');
-      if (mountedRef.current) {
-        setIsConnected(true);
-        setProgressMessage('Connected, fetching videos...');
-      }
+      setIsConnected(true);
+      setInitPhase('videos');
+      setProgressMessage('Connected, fetching videos...');
+
       // Fetch videos
-      if (mountedRef.current) setProgressMessage('Fetching videos...');
       const response = await fetch("https://192.168.1.108:8000/videos");
       const data = await response.json();
-      if (mountedRef.current) {
-        setVideos(data.videos);
-        setProgressMessage('Ready');
-        setShowProgress(false);
-        setStatus('Connected and ready');
-      }
+      setVideos(data.videos);
+      setInitPhase('complete');
+      setProgressMessage('Ready');
+      setShowProgress(false);
+      setStatus('Connected and ready');
 
       globalInitState.hasInitialized = true;
 
     } catch (err) {
       console.error('Initialization error:', err);
-      if (mountedRef.current) {
-        setError('Failed to initialize: ' + err.toString());
-        setShowProgress(false);
-        setIsModelLoaded(false);
-        setProgressMessage('Initialization failed');
-        setIsConnected(false);
-      }
+      setError('Failed to initialize: ' + err.toString());
+      setShowProgress(false);
+      setIsModelLoaded(false);
+      setProgressMessage('Initialization failed');
+      setIsConnected(false);
+      setInitPhase('idle');
     } finally {
       globalInitState.isInitializing = false;
     }
@@ -247,18 +241,15 @@ useEffect(() => {
 
   initCodec();
 
-  // Cleanup function
   return () => {
     mountedRef.current = false;
-    
-    // Don't cleanup codec on strict mode remount if we're still initializing
     if (!globalInitState.isInitializing && codecRef.current) {
       console.log('Running final cleanup...');
       codecRef.current.cleanup();
       codecRef.current = null;
     }
   };
-}, []); // Empty dependency array
+}, []);
 
 // Add a status tracking effect
 useEffect(() => {
@@ -302,8 +293,12 @@ useEffect(() => {
   }, [codecRef.current]); // Depend on codecRef.current
 
   // Update the video selection handler
-  const handleVideoSelect = async (value: string) => {
+   const handleVideoSelect = async (value: string) => {
     try {
+      if (initPhase !== 'complete') {
+        throw new Error("System initialization not complete");
+      }
+
       const videoId = Number(value);
       console.log("Selected video ID:", videoId);
 
@@ -313,13 +308,15 @@ useEffect(() => {
       setReferenceFrame(0);
 
       if (codecRef.current) {
-        // Initialize playback for the selected video
+        console.log('Loading reference data...');
+        await codecRef.current.loadReferenceData(videoId);
+        
+        console.log('Starting playback...');
         await codecRef.current.startPlayback(videoId);
 
-        // Fetch initial frames
         const [currentImg, referenceImg] = await Promise.all([
-          fetchFrame(videoId, 0), // Current frame
-          fetchFrame(videoId, 0)  // Reference frame
+          fetchFrame(videoId, 0),
+          fetchFrame(videoId, 0)
         ]);
 
         if (currentImg && referenceImg) {
@@ -564,83 +561,64 @@ useEffect(() => {
   );
 
   // Add status indicator component
-  const StatusIndicator = () => {
+  const StatusDisplay = () => {
     const getStatusText = () => {
-      if (showProgress) {
-        return progressMessage; // Use the current progress message
+      switch (initPhase) {
+        case 'idle': return 'Initializing...';
+        case 'model': return 'Loading model...';
+        case 'connection': return 'Establishing connection...';
+        case 'videos': return 'Loading videos...';
+        case 'complete': return 'Ready';
+        case 'error': return 'Initialization failed';
+        default: return 'Unknown state';
       }
-      if (!isModelLoaded) {
-        return "Initializing...";
-      }
-      if (!isConnected) {
-        return "Connecting...";
-      }
-      if (videos.length === 0) {
-        return "Loading videos...";
-      }
-      if (isLoading) {
-        return "Processing...";
-      }
-      return "Ready";
     };
-  
+
     const getStatusColor = () => {
-      if (error) return 'bg-red-500';
-      if (!isReady || isLoading || showProgress) {
-        return 'bg-yellow-500 animate-pulse';
+      switch (initPhase) {
+        case 'complete': return 'bg-green-500';
+        case 'error': return 'bg-red-500';
+        default: return 'bg-yellow-500 animate-pulse';
       }
-      return 'bg-green-500';
     };
-  
+
     return (
       <div className="flex items-center space-x-2">
-        <div className="text-sm font-medium">
-          Status: {getStatusText()}
-          {selectedVideo !== null && ` (Video ${selectedVideo} selected)`}
-        </div>
-        <div className="flex items-center space-x-1">
-          <div className={`w-2 h-2 rounded-full ${getStatusColor()}`} />
-          <span className="text-xs text-gray-500">
-            {error ? 'Error' : isReady ? 'Ready' : 'Loading...'}
-          </span>
-        </div>
+        <div className={`w-2 h-2 rounded-full ${getStatusColor()}`} />
+        <span className="text-sm font-medium">{getStatusText()}</span>
       </div>
     );
   };
-  
-
   const DebugPanel = () => (
-    <div className="text-xs text-gray-500 mt-2">
-      <div>Model Loaded: {isModelLoaded ? '✅' : '❌'}</div>
-      <div>Connected: {isConnected ? '✅' : '❌'}</div>
+    <div className="text-xs text-gray-500 mt-2 space-y-1">
+      <div>Current Phase: {initPhase}</div>
       <div>Videos Loaded: {videos.length > 0 ? '✅' : '❌'}</div>
-      <div>Ready: {isReady ? '✅' : '❌'}</div>
+      <div>Processing: {isLoading ? '⏳' : '✅'}</div>
+      <div>Model Progress: {(modelProgress * 100).toFixed(1)}%</div>
+      {error && <div className="text-red-500">Error: {error}</div>}
     </div>
   );
 
   return (
     <Card className="w-full max-w-2xl">
-      {/* <DebugPanel/> */}
-      <ProgressBar
-        progress={modelProgress}
-        message={progressMessage}
-        isVisible={showProgress}
-        phase={currentPhase}
-      />
+       <DebugPanel/> 
+       <ProgressBar
+          progress={modelProgress}
+          message={progressMessage}
+          isVisible={initPhase !== 'complete' && initPhase !== 'error'}
+          phase={initPhase}
+        />
       <CardHeader>
 
         <CardTitle className="flex justify-between items-center">
           <span>NVC Video Processing</span>
-          <StatusIndicator />
+          <StatusDisplay />
         </CardTitle>
       </CardHeader>
 
       <CardContent>
         <div className="space-y-6">
-          <div className="text-sm font-medium">
-            Status: {status}
-            {selectedVideo !== null && ` (Video ${selectedVideo} selected)`}
-          </div>
+         
 
           {error && (
             <Alert variant="destructive">

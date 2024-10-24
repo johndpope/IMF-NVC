@@ -101,6 +101,25 @@ interface CodecMetrics {
   lastUpdate: number;
 }
 
+
+// Add new types for bulk token operations
+interface BulkTokenResponse {
+  videoId: number;
+  tokens: {
+    [frameIndex: number]: number[];
+  };
+  metadata: {
+    totalFrames: number;
+    processedFrames: number;
+  };
+}
+
+interface BatchProcessingResult {
+  frameIndex: number;
+  imageUrl: string;
+}
+
+
 // Additional types for event handling and metrics
 type EventCallback = (data: any) => void;
 type EventType = "frameReady" | "error" | "bufferStatus" | "metricsUpdate";
@@ -109,7 +128,12 @@ type EventType = "frameReady" | "error" | "bufferStatus" | "metricsUpdate";
 interface CodecEvents {
   frameReady: (data: { frameIndex: number; imageUrl: string }) => void;
   error: (data: { message: string; error?: any }) => void;
-  bufferStatus: (data: { frameCount: number; capacity: number }) => void;
+  bufferStatus: (data: {
+    frameCount?: number;
+    capacity?: number;
+    health?: number;  // Add health for model loading progress
+    type?: 'buffer' | 'model' // Add type to distinguish between buffer and model status
+  }) => void;
   metricsUpdate: (metrics: CodecMetrics) => void;
 }
 
@@ -195,15 +219,18 @@ abstract class BaseNeuralCodec {
     try {
       const tf = await import("@tensorflow/tfjs");
       await import("@tensorflow/tfjs-backend-webgpu");
-  
+
       const webGPUConfig = {
         devicePixelRatio: 1,
         maxBufferSize: 1000000000,
       };
-  
+
       // Initial progress update
-      this.emit("bufferStatus", { health: 0 });
-  
+      this.emit("bufferStatus", {
+        health: 0,
+        type: 'model'
+      });
+
       // Setup backend
       try {
         await tf.setBackend("webgpu");
@@ -217,7 +244,7 @@ abstract class BaseNeuralCodec {
         await tf.setBackend("webgl");
         await tf.ready();
       }
-  
+
       // Load model with explicit progress tracking
       this.model = await tf.loadGraphModel(modelPath, {
         onProgress: (fraction) => {
@@ -225,17 +252,26 @@ abstract class BaseNeuralCodec {
           const progressPercent = Math.round(fraction * 100);
           console.log(`Model loading progress: ${progressPercent}%`);
           // Emit progress update
-          this.emit("bufferStatus", { health: progressPercent });
+          this.emit("bufferStatus", {
+            health: progressPercent,
+            type: 'model'
+          });
         }
       });
-  
+
       // Final progress update
-      this.emit("bufferStatus", { health: 100 });
+      this.emit("bufferStatus", {
+        health: 100,
+        type: 'model'
+      });
       console.log("Model loaded successfully");
-  
+
     } catch (error) {
       // Error handling with progress reset
-      this.emit("bufferStatus", { health: 0 });
+      this.emit("bufferStatus", {
+        health: 0,
+        type: 'model'
+      });
       console.error("Error initializing model:", error);
       throw error;
     }
@@ -257,233 +293,237 @@ abstract class BaseNeuralCodec {
   }
 
   public async processFrame(frameToken: FrameToken): Promise<void> {
-    // Early checks
-    if (!this.model || !this.currentVideoId) {
-        throw new Error("Model or video not initialized");
-    }
 
+    
+    // Early checks
+    if (!this.model) {
+      throw new Error("Model not initialized");
+    }
+    if (!this.currentVideoId) {
+      throw new Error("currentVideoId not initialized");
+    }
     const refData = this.referenceData.get(this.currentVideoId);
     if (!refData) {
-        throw new Error("Reference data not loaded");
+      throw new Error("Reference data not loaded");
     }
 
     // Initialize tensors array at method start
     const tensorsToDispose: tfjs.Tensor[] = [];
 
-    
+
 
     try {
-        const tf = await import("@tensorflow/tfjs");
+      const tf = await import("@tensorflow/tfjs");
 
-        // Verify token shape before creating tensor
-        console.log("Token verification:", {
-            length: frameToken.token.length,
-            expectedLength: 32,
-            preview: Array.from(frameToken.token.slice(0, 5))
-        });
+      // Verify token shape before creating tensor
+      console.log("Token verification:", {
+        length: frameToken.token.length,
+        expectedLength: 32,
+        preview: Array.from(frameToken.token.slice(0, 5))
+      });
 
-        if (frameToken.token.length !== 32) {
-            throw new Error(`Invalid token length: ${frameToken.token.length}, expected 32`);
+      if (frameToken.token.length !== 32) {
+        throw new Error(`Invalid token length: ${frameToken.token.length}, expected 32`);
+      }
+
+      // Create token tensor
+      const currentToken = tf.tensor2d([Array.from(frameToken.token)], [1, 32])
+        .asType("float32");
+      tensorsToDispose.push(currentToken);
+
+      // Verify tensor creation
+      console.log("Created tensor:", {
+        shape: currentToken.shape,
+        dtype: currentToken.dtype,
+        dataPreview: Array.from(await currentToken.data()).slice(0, 5)
+      });
+
+      // Debug log the token before creating tensor
+      console.log("Processing frame:", {
+        frameIndex: frameToken.frameIndex,
+        tokenLength: frameToken.token.length,
+        tokenPreview: Array.from(frameToken.token.slice(0, 5)),
+        expectedShape: [1, 32]
+      });
+
+
+
+      // Debug log reference features
+      console.log("Reference features:", {
+        feature0Shape: refData.features[0].shape,
+        feature1Shape: refData.features[1].shape,
+        feature2Shape: refData.features[2].shape,
+        feature3Shape: refData.features[3].shape
+      });
+
+      // Execute model using pre-converted reference features
+      const outputTensor = tf.tidy(() => {
+        try {
+          const inputDict = {
+            "args_0:0": currentToken,
+            "args_0_1:0": currentToken,
+            args_0_2: refData.features[0],
+            args_0_3: refData.features[1],
+            args_0_4: refData.features[2],
+            args_0_5: refData.features[3],
+          };
+
+          // Debug log input shapes
+          console.log("Model inputs:", {
+            args_0_shape: inputDict["args_0:0"].shape,
+            args_0_1_shape: inputDict["args_0_1:0"].shape,
+            args_0_2_shape: inputDict.args_0_2.shape,
+            args_0_3_shape: inputDict.args_0_3.shape,
+            args_0_4_shape: inputDict.args_0_4.shape,
+            args_0_5_shape: inputDict.args_0_5.shape,
+          });
+
+          const result = this.model!.execute(inputDict);
+          tensorsToDispose.push(result as tfjs.Tensor);
+          return result;
+        } catch (execError) {
+          console.error("Model execution error:", execError);
+          console.error("Model info:", {
+            inputSignature: this.model!.inputs.map(i => ({
+              name: i.name,
+              shape: i.shape
+            })),
+            outputSignature: this.model!.outputs.map(o => ({
+              name: o.name,
+              shape: o.shape
+            }))
+          });
+          throw execError;
         }
+      });
 
-        // Create token tensor
-        const currentToken = tf.tensor2d([Array.from(frameToken.token)], [1, 32])
-            .asType("float32");
-        tensorsToDispose.push(currentToken);
+      // Debug log the output tensor
+      console.log("Model output:", {
+        shape: outputTensor.shape,
+        dtype: outputTensor.dtype
+      });
 
-        // Verify tensor creation
-        console.log("Created tensor:", {
-            shape: currentToken.shape,
-            dtype: currentToken.dtype,
-            dataPreview: Array.from(await currentToken.data()).slice(0, 5)
-        });
-
-        // Debug log the token before creating tensor
-        console.log("Processing frame:", {
-            frameIndex: frameToken.frameIndex,
-            tokenLength: frameToken.token.length,
-            tokenPreview: Array.from(frameToken.token.slice(0, 5)),
-            expectedShape: [1, 32]
-        });
-
-
-
-        // Debug log reference features
-        console.log("Reference features:", {
-            feature0Shape: refData.features[0].shape,
-            feature1Shape: refData.features[1].shape,
-            feature2Shape: refData.features[2].shape,
-            feature3Shape: refData.features[3].shape
-        });
-
-        // Execute model using pre-converted reference features
-        const outputTensor = tf.tidy(() => {
-            try {
-                const inputDict = {
-                    "args_0:0": currentToken,
-                    "args_0_1:0": currentToken,
-                    args_0_2: refData.features[0],
-                    args_0_3: refData.features[1],
-                    args_0_4: refData.features[2],
-                    args_0_5: refData.features[3],
-                };
-
-                // Debug log input shapes
-                console.log("Model inputs:", {
-                    args_0_shape: inputDict["args_0:0"].shape,
-                    args_0_1_shape: inputDict["args_0_1:0"].shape,
-                    args_0_2_shape: inputDict.args_0_2.shape,
-                    args_0_3_shape: inputDict.args_0_3.shape,
-                    args_0_4_shape: inputDict.args_0_4.shape,
-                    args_0_5_shape: inputDict.args_0_5.shape,
-                });
-
-                const result = this.model!.execute(inputDict);
-                tensorsToDispose.push(result as tfjs.Tensor);
-                return result;
-            } catch (execError) {
-                console.error("Model execution error:", execError);
-                console.error("Model info:", {
-                    inputSignature: this.model!.inputs.map(i => ({
-                        name: i.name,
-                        shape: i.shape
-                    })),
-                    outputSignature: this.model!.outputs.map(o => ({
-                        name: o.name,
-                        shape: o.shape
-                    }))
-                });
-                throw execError;
-            }
-        });
-
-        // Debug log the output tensor
-        console.log("Model output:", {
-            shape: outputTensor.shape,
-            dtype: outputTensor.dtype
-        });
-
-        // Process output tensor
-        const processedTensor = tf.tidy(() => {
-            let tensor = outputTensor as tfjs.Tensor;
-            if (tensor.shape[1] === 3) {
-                tensor = tf.transpose(tensor, [0, 2, 3, 1]);
-            }
-            tensor = tensor.squeeze([0]);
-            return tf.clipByValue(tensor, 0, 1);
-        });
-        tensorsToDispose.push(processedTensor);
-
-        // Debug log final processed tensor
-        console.log("Processed output:", {
-            shape: processedTensor.shape,
-            dtype: processedTensor.dtype
-        });
-
-        // Convert to image
-        const canvas = document.createElement("canvas");
-        canvas.width = processedTensor.shape[1];
-        canvas.height = processedTensor.shape[0];
-
-        await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
-
-        // Add to frame buffer
-        this.frameBuffer.frames.set(frameToken.frameIndex, {
-            timestamp: Date.now(),
-            data: canvas.toDataURL(),
-        });
-
-        // Manage buffer size
-        if (this.frameBuffer.frames.size > this.frameBuffer.capacity) {
-            const oldestFrame = Math.min(...this.frameBuffer.frames.keys());
-            this.frameBuffer.frames.delete(oldestFrame);
+      // Process output tensor
+      const processedTensor = tf.tidy(() => {
+        let tensor = outputTensor as tfjs.Tensor;
+        if (tensor.shape[1] === 3) {
+          tensor = tf.transpose(tensor, [0, 2, 3, 1]);
         }
+        tensor = tensor.squeeze([0]);
+        return tf.clipByValue(tensor, 0, 1);
+      });
+      tensorsToDispose.push(processedTensor);
 
-        // Emit frame ready event
-        this.emit("frameReady", {
-            frameIndex: frameToken.frameIndex,
-            imageUrl: canvas.toDataURL(),
-        });
+      // Debug log final processed tensor
+      console.log("Processed output:", {
+        shape: processedTensor.shape,
+        dtype: processedTensor.dtype
+      });
+
+      // Convert to image
+      const canvas = document.createElement("canvas");
+      canvas.width = processedTensor.shape[1];
+      canvas.height = processedTensor.shape[0];
+
+      await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
+
+      // Add to frame buffer
+      this.frameBuffer.frames.set(frameToken.frameIndex, {
+        timestamp: Date.now(),
+        data: canvas.toDataURL(),
+      });
+
+      // Manage buffer size
+      if (this.frameBuffer.frames.size > this.frameBuffer.capacity) {
+        const oldestFrame = Math.min(...this.frameBuffer.frames.keys());
+        this.frameBuffer.frames.delete(oldestFrame);
+      }
+
+      // Emit frame ready event
+      this.emit("frameReady", {
+        frameIndex: frameToken.frameIndex,
+        imageUrl: canvas.toDataURL(),
+      });
 
     } catch (error) {
-        console.error("Error processing frame:", error);
-        console.error("Token details at error:", {
-            frameIndex: frameToken.frameIndex,
-            tokenLength: frameToken.token.length,
-            tokenPreview: Array.from(frameToken.token.slice(0, 5))
-        });
-        throw error;
+      console.error("Error processing frame:", error);
+      console.error("Token details at error:", {
+        frameIndex: frameToken.frameIndex,
+        tokenLength: frameToken.token.length,
+        tokenPreview: Array.from(frameToken.token.slice(0, 5))
+      });
+      throw error;
     } finally {
-        // Clean up tensors
-        console.log(`Cleaning up ${tensorsToDispose.length} tensors`);
-        tensorsToDispose.forEach(tensor => {
-            if (tensor && !tensor.isDisposed) {
-                tensor.dispose();
-            }
-        });
-    }
-}
-
-public async loadReferenceData(videoId: number): Promise<void> {
-    try {
-        const response = await fetch(
-            `https://192.168.1.108:8000/videos/${videoId}/reference`,
-            {
-                credentials: "same-origin",
-                headers: {
-                    Accept: "application/json",
-                },
-            }
-        );
-
-        if (!response.ok) {
-            throw new Error(`Failed to fetch reference data: ${response.statusText}`);
+      // Clean up tensors
+      console.log(`Cleaning up ${tensorsToDispose.length} tensors`);
+      tensorsToDispose.forEach(tensor => {
+        if (tensor && !tensor.isDisposed) {
+          tensor.dispose();
         }
-
-        const data = await response.json();
-        
-        // Debug log the received reference data
-        console.log("Received reference data:", {
-            dataShapes: data.shapes,
-            tokenLength: data.reference_token.length,
-            tokenPreview: data.reference_token.slice(0, 5),
-            featureShapes: data.reference_features.map((f: any[]) => 
-                `[${f.length}, ${f[0].length}, ${f[0][0].length}, ${f[0][0][0].length}]`
-            )
-        });
-
-        const tf = await import("@tensorflow/tfjs");
-        const shapes = [
-            [1, 128, 64, 64],
-            [1, 256, 32, 32],
-            [1, 512, 16, 16],
-            [1, 512, 8, 8],
-        ];
-
-        const featureTensors = data.reference_features.map(
-            (feature: number[][][], idx: number) => {
-                const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
-                console.log(`Feature tensor ${idx}:`, {
-                    shape: tensor.shape,
-                    dtype: tensor.dtype
-                });
-                return tensor;
-            }
-        );
-
-        this.referenceData.set(videoId, {
-            features: featureTensors,
-            token: data.reference_token,
-            shapes,
-        });
-
-        console.log(`Reference data loaded for video ${videoId}`);
-    } catch (error) {
-        console.error("Error loading reference data:", error);
-        this.cleanupReferenceTensors(videoId);
-        throw error;
+      });
     }
-}
+  }
+
+  public async loadReferenceData(videoId: number): Promise<void> {
+    try {
+      const response = await fetch(
+        `https://192.168.1.108:8000/videos/${videoId}/reference`,
+        {
+          credentials: "same-origin",
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch reference data: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+
+      // Debug log the received reference data
+      console.log("Received reference data:", {
+        dataShapes: data.shapes,
+        tokenLength: data.reference_token.length,
+        tokenPreview: data.reference_token.slice(0, 5),
+        featureShapes: data.reference_features.map((f: any[]) =>
+          `[${f.length}, ${f[0].length}, ${f[0][0].length}, ${f[0][0][0].length}]`
+        )
+      });
+
+      const tf = await import("@tensorflow/tfjs");
+      const shapes = [
+        [1, 128, 64, 64],
+        [1, 256, 32, 32],
+        [1, 512, 16, 16],
+        [1, 512, 8, 8],
+      ];
+
+      const featureTensors = data.reference_features.map(
+        (feature: number[][][], idx: number) => {
+          const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
+          console.log(`Feature tensor ${idx}:`, {
+            shape: tensor.shape,
+            dtype: tensor.dtype
+          });
+          return tensor;
+        }
+      );
+
+      this.referenceData.set(videoId, {
+        features: featureTensors,
+        token: data.reference_token,
+        shapes,
+      });
+
+      console.log(`Reference data loaded for video ${videoId}`);
+    } catch (error) {
+      console.error("Error loading reference data:", error);
+      this.cleanupReferenceTensors(videoId);
+      throw error;
+    }
+  }
 
   public cleanupReferenceTensors(videoId: number): void {
     const refData = this.referenceData.get(videoId);
@@ -518,23 +558,63 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   private retryCount = 0;
   private retryTimeout: NodeJS.Timeout | null = null;
   private isReconnecting = false;
+
+
+  private dataChannelOpenPromise: Promise<void> | null = null;
+  private dataChannelResolve: (() => void) | null = null;
+  private connectionTimeout: number = 10000; // 10 seconds timeout
+
+  private modelInitialized = false;
+  private modelLoadPromise: Promise<void> | null = null;
+  private isCleaningUp = false;
+  private tokenCache: Map<number, Map<number, number[]>> = new Map();
+  private batchSize: number = 4; // Configurable batch size for processing
+ 
+
   constructor(config: RTCConfig) {
     super(config);
     this.audioElement = new Audio();
     this.audioElement.autoplay = true;
     this.setupAudioElement();
+    if (config.modelPath) {
+      this.modelLoadPromise = this.initModel(config.modelPath).then(() => {
+        this.modelInitialized = true;
+      });
+    }
+  }
+
+  // Add method to check model state
+  private async ensureModel(): Promise<void> {
+    if (this.modelInitialized && this.model) {
+      return;
+    }
+
+    if (this.modelLoadPromise) {
+      await this.modelLoadPromise;
+    } else if (this.config.modelPath) {
+      this.modelLoadPromise = this.initModel(this.config.modelPath).then(() => {
+        this.modelInitialized = true;
+      });
+      await this.modelLoadPromise;
+    } else {
+      throw new Error("No model path provided");
+    }
+
+    if (!this.model) {
+      throw new Error("Model failed to initialize");
+    }
   }
 
   private getRetryDelay(): number {
-        // Exponential backoff with jitter
-        const exponentialDelay = Math.min(
-            this.INITIAL_RETRY_DELAY * Math.pow(2, this.retryCount),
-            this.MAX_RETRY_DELAY
-        );
-        // Add random jitter (±20%)
-        const jitter = exponentialDelay * 0.2 * (Math.random() * 2 - 1);
-        return exponentialDelay + jitter;
-    }
+    // Exponential backoff with jitter
+    const exponentialDelay = Math.min(
+      this.INITIAL_RETRY_DELAY * Math.pow(2, this.retryCount),
+      this.MAX_RETRY_DELAY
+    );
+    // Add random jitter (±20%)
+    const jitter = exponentialDelay * 0.2 * (Math.random() * 2 - 1);
+    return exponentialDelay + jitter;
+  }
 
   private async setupWebRTC(config: RTCConfiguration): Promise<void> {
     this.peerConnection = new RTCPeerConnection(config);
@@ -570,65 +650,65 @@ class RTCNeuralCodec extends BaseNeuralCodec {
 
   private async handleFrameToken(message: any) {
     const { frameIndex, token } = message;
-    
+
     // Debug log the incoming token data
     console.log("Received frame token:", {
-        frameIndex,
-        tokenShape: token.length,
-        tokenPreview: token.slice(0, 5),
-        tokenType: typeof token,
-        isArray: Array.isArray(token),
-        fullToken: token // temporary for debugging
+      frameIndex,
+      tokenShape: token.length,
+      tokenPreview: token.slice(0, 5),
+      tokenType: typeof token,
+      isArray: Array.isArray(token),
+      fullToken: token // temporary for debugging
     });
 
     // Flatten nested arrays if needed
     let flatToken: number[];
     if (Array.isArray(token[0]) && Array.isArray(token[0][0])) {
-        // Double nested array
-        flatToken = token[0];
+      // Double nested array
+      flatToken = token[0];
     } else if (Array.isArray(token[0])) {
-        // Single nested array
-        flatToken = token[0];
+      // Single nested array
+      flatToken = token[0];
     } else {
-        // Already flat
-        flatToken = token;
+      // Already flat
+      flatToken = token;
     }
 
     console.log("Flattened token:", {
-        length: flatToken.length,
-        preview: flatToken.slice(0, 5),
-        isArray: Array.isArray(flatToken)
+      length: flatToken.length,
+      preview: flatToken.slice(0, 5),
+      isArray: Array.isArray(flatToken)
     });
 
     try {
-        // Process frame and add to processing queue
-        const processPromise = this.processFrame({
-            frameIndex,
-            token: new Float32Array(flatToken)
-        });
+      // Process frame and add to processing queue
+      const processPromise = this.processFrame({
+        frameIndex,
+        token: new Float32Array(flatToken)
+      });
 
-        this.processingQueue.set(frameIndex, processPromise);
+      this.processingQueue.set(frameIndex, processPromise);
 
-        // Clean up queue after processing
-        await processPromise;
-        this.processingQueue.delete(frameIndex);
+      // Clean up queue after processing
+      await processPromise;
+      this.processingQueue.delete(frameIndex);
     } catch (error) {
-        console.error("Frame processing error:", error);
-        console.error("Token state at error:", {
-            original: token,
-            flattened: flatToken,
-            lengths: {
-                original: token.length,
-                flattened: flatToken.length
-            }
-        });
-        this.metrics.droppedFrames++;
-        this.emit("error", {
-            message: "Frame processing failed",
-            error,
-        });
+      console.error("Frame processing error:", error);
+      console.error("Token state at error:", {
+        original: token,
+        flattened: flatToken,
+        lengths: {
+          original: token.length,
+          flattened: flatToken.length
+        }
+      });
+      this.metrics.droppedFrames++;
+      this.emit("error", {
+        message: "Frame processing failed",
+        error,
+      });
     }
-}
+  }
 
 
   private setupAudioElement() {
@@ -651,28 +731,51 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     this.updateMetrics();
   }
 
-  public async startPlayback(videoId: number): Promise<void> {
+  async startPlayback(videoId: number): Promise<void> {
     try {
       this.currentVideoId = videoId;
 
-      // Load reference features first
+      // Load reference data first
       await this.loadReferenceData(videoId);
 
-      // Signal ready to stream
-      this.dataChannel?.send(
-        JSON.stringify({
-          type: "start_stream",
-          videoId,
-          fps: this.config.fps,
-        })
-      );
+      // Prefetch first chunk of tokens (e.g., first 100 frames)
+      const prefetchSize = 100;
+      await this.fetchBulkTokens(videoId, 0, prefetchSize - 1);
 
-      // Start audio playback when ready
-      await this.audioElement.play();
+      // Start background token fetching for next chunks
+      this.startBackgroundTokenFetching(videoId, prefetchSize);
+
+      // Signal ready to stream
+      if (this.dataChannel?.readyState === "open") {
+        this.dataChannel.send(
+          JSON.stringify({
+            type: "start_stream",
+            videoId,
+            fps: this.config.fps,
+          })
+        );
+      }
     } catch (error) {
       console.error("Playback start failed:", error);
       this.emit("error", { message: "Failed to start playback", error });
       throw error;
+    }
+  }
+  
+  // Background token fetching
+  private async startBackgroundTokenFetching(videoId: number, startFrame: number): Promise<void> {
+    const chunkSize = 100;
+    let currentStart = startFrame;
+
+    while (this.isPlaying && this.currentVideoId === videoId) {
+      try {
+        await this.fetchBulkTokens(videoId, currentStart, currentStart + chunkSize - 1);
+        currentStart += chunkSize;
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
+      } catch (error) {
+        console.error("Background token fetching error:", error);
+        break;
+      }
     }
   }
 
@@ -689,7 +792,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     this.reconnect();
   }
 
-  
+
 
   private async handleSignalingMessage(event: MessageEvent): Promise<void> {
     if (!this.signalingWs || this.signalingWs.readyState !== WebSocket.OPEN) {
@@ -889,27 +992,44 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     try {
       // Reset retry count on new connection attempt
       this.retryCount = 0;
-      await this.ensureCleanup();
+      await this.cleanup(true); // Preserve model during connection cleanup
 
+      // Create WebSocket connection
       this.signalingWs = new WebSocket(signalingUrl);
 
       return new Promise((resolve, reject) => {
-        if (!this.signalingWs)
+        if (!this.signalingWs) {
           return reject(new Error("No WebSocket connection"));
+        }
 
-        const timeout = setTimeout(() => {
+        let connectionTimeout = setTimeout(() => {
           this.handleConnectionTimeout(reject);
-        }, 10000);
+        }, this.connectionTimeout);
 
-        this.signalingWs.onopen = () => {
-          clearTimeout(timeout);
-          this.retryCount = 0; // Reset retry count on successful connection
-          this.isReconnecting = false;
-          this.initializeSignaling().then(resolve).catch(reject);
+        this.signalingWs.onopen = async () => {
+          try {
+            clearTimeout(connectionTimeout);
+            this.retryCount = 0;
+            this.isReconnecting = false;
+
+            // Initialize signaling first
+            await this.initializeSignaling();
+
+            // Wait for data channel to be ready
+            console.log('Waiting for data channel to open...');
+            await this.waitForDataChannel();
+            console.log('Data channel opened successfully');
+
+            resolve();
+          } catch (error) {
+            console.error('Connection setup failed:', error);
+            reject(error);
+            await this.handleReconnect();
+          }
         };
 
         this.signalingWs.onerror = (error) => {
-          clearTimeout(timeout);
+          clearTimeout(connectionTimeout);
           this.handleConnectionError(error, reject);
         };
 
@@ -919,6 +1039,47 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     } catch (error) {
       console.error("Connection failed:", error);
       this.emit("error", { message: "Connection failed", error });
+      throw error;
+    }
+  }
+
+  async fetchBulkTokens(videoId: number, startFrame: number, endFrame: number): Promise<void> {
+    try {
+      const response = await fetch(
+        `https://192.168.1.108:8000/videos/${videoId}/tokens?start=${startFrame}&end=${endFrame}`,
+        {
+          credentials: "same-origin",
+          headers: {
+            Accept: "application/json",
+          },
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch bulk tokens: ${response.statusText}`);
+      }
+
+      const data: BulkTokenResponse = await response.json();
+      
+      // Initialize video token cache if needed
+      if (!this.tokenCache.has(videoId)) {
+        this.tokenCache.set(videoId, new Map());
+      }
+      
+      // Store tokens in cache
+      const videoTokens = this.tokenCache.get(videoId)!;
+      Object.entries(data.tokens).forEach(([frameIndex, token]) => {
+        videoTokens.set(parseInt(frameIndex), token);
+      });
+
+      this.emit("bufferStatus", {
+        frameCount: Object.keys(data.tokens).length,
+        capacity: endFrame - startFrame + 1,
+        health: (data.metadata.processedFrames / data.metadata.totalFrames) * 100
+      });
+
+    } catch (error) {
+      console.error("Error fetching bulk tokens:", error);
       throw error;
     }
   }
@@ -1040,75 +1201,87 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  public async cleanup(): Promise<void> {
-    console.log('Starting codec cleanup...');
-    
-    // Clear any pending retry timeout
-    if (this.retryTimeout) {
-      clearTimeout(this.retryTimeout);
-      this.retryTimeout = null;
+  // Update cleanup to preserve model when needed
+  public async cleanup(preserveModel: boolean = false): Promise<void> {
+    if (this.isCleaningUp) {
+      return;
     }
-  
-    // Reset state flags
-    this.isReconnecting = false;
-    this.retryCount = 0;
-  
-    // Clean up data channel
-    if (this.dataChannel) {
-      this.dataChannel.onopen = null;
-      this.dataChannel.onclose = null;
-      this.dataChannel.onmessage = null;
-      this.dataChannel.close();
-      this.dataChannel = null;
-    }
-  
-    // Clean up peer connection
-    if (this.peerConnection) {
-      this.peerConnection.onicecandidate = null;
-      this.peerConnection.oniceconnectionstatechange = null;
-      this.peerConnection.ontrack = null;
-      this.peerConnection.close();
-      this.peerConnection = null;
-    }
-  
-    // Clean up WebSocket
-    if (this.signalingWs) {
-      this.signalingWs.onopen = null;
-      this.signalingWs.onclose = null;
-      this.signalingWs.onerror = null;
-      this.signalingWs.onmessage = null;
-  
-      if (this.signalingWs.readyState === WebSocket.OPEN) {
-        this.signalingWs.close(1000, "Cleanup");
+
+    this.isCleaningUp = true;
+    console.log('Starting codec cleanup...', { preserveModel });
+
+    try {
+      // Clear any pending retry timeout
+      if (this.retryTimeout) {
+        clearTimeout(this.retryTimeout);
+        this.retryTimeout = null;
       }
-      this.signalingWs = null;
-    }
-  
-    // Clean up audio
-    if (this.audioElement) {
-      this.audioElement.pause();
-      this.audioElement.srcObject = null;
-    }
-  
-    // Clean up processing queue
-    this.processingQueue.clear();
-  
-    // Clean up reference data and model
-    if (this.currentVideoId) {
-      this.cleanupReferenceTensors(this.currentVideoId);
-      this.currentVideoId = null;
-    }
-  
-    if (this.model) {
-      try {
-        this.model.dispose();
-      } catch (error) {
-        console.warn('Error disposing model:', error);
+
+      // Reset state flags
+      this.isReconnecting = false;
+      this.retryCount = 0;
+
+      // Clean up data channel
+      if (this.dataChannel) {
+        this.dataChannel.onopen = null;
+        this.dataChannel.onclose = null;
+        this.dataChannel.onmessage = null;
+        this.dataChannel.close();
+        this.dataChannel = null;
       }
-      this.model = null;
+
+      // Clean up peer connection
+      if (this.peerConnection) {
+        this.peerConnection.onicecandidate = null;
+        this.peerConnection.oniceconnectionstatechange = null;
+        this.peerConnection.ontrack = null;
+        this.peerConnection.close();
+        this.peerConnection = null;
+      }
+
+      // Clean up WebSocket
+      if (this.signalingWs) {
+        this.signalingWs.onopen = null;
+        this.signalingWs.onclose = null;
+        this.signalingWs.onerror = null;
+        this.signalingWs.onmessage = null;
+
+        if (this.signalingWs.readyState === WebSocket.OPEN) {
+          this.signalingWs.close(1000, "Cleanup");
+        }
+        this.signalingWs = null;
+      }
+
+      // Clean up audio
+      if (this.audioElement) {
+        this.audioElement.pause();
+        this.audioElement.srcObject = null;
+      }
+
+      // Clean up processing queue
+      this.processingQueue.clear();
+
+      // Clean up reference data
+      if (this.currentVideoId) {
+        this.cleanupReferenceTensors(this.currentVideoId);
+        this.currentVideoId = null;
+      }
+
+      // Only dispose of model if not preserving
+      if (!preserveModel && this.model) {
+        try {
+          this.model.dispose();
+          this.model = null;
+          this.modelInitialized = false;
+        } catch (error) {
+          console.warn('Error disposing model:', error);
+        }
+      }
+
+      console.log('Codec cleanup completed');
+    } finally {
+      this.isCleaningUp = false;
     }
-  
-    console.log('Codec cleanup completed');
   }
 
   private async initializeSignaling(): Promise<void> {
@@ -1136,6 +1309,15 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       }
     };
 
+    // Create data channel before sending init message
+    this.dataChannel = this.peerConnection.createDataChannel("frames", {
+      ordered: true,
+      maxRetransmits: 1,
+    });
+
+    // Setup data channel first
+    this.setupDataChannel();
+
     // Send initialization message
     this.sendSignalingMessage({
       type: "init",
@@ -1147,12 +1329,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       },
     });
 
-    // Create data channel
-    this.dataChannel = this.peerConnection.createDataChannel("frames", {
-      ordered: true,
-      maxRetransmits: 1,
-    });
-
     // Set up connection monitoring
     this.peerConnection.onconnectionstatechange = () => {
       console.log("Connection state:", this.peerConnection?.connectionState);
@@ -1162,16 +1338,11 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     };
 
     this.peerConnection.oniceconnectionstatechange = () => {
-      console.log(
-        "ICE connection state:",
-        this.peerConnection?.iceConnectionState
-      );
+      console.log("ICE connection state:", this.peerConnection?.iceConnectionState);
       if (this.peerConnection?.iceConnectionState === "failed") {
         this.handleICEFailure();
       }
     };
-
-    this.setupDataChannel();
   }
 
   private async handleConnectionFailure(): Promise<void> {
@@ -1237,32 +1408,82 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
+  // Add connection state tracking
+  private async waitForDataChannel(): Promise<void> {
+    if (!this.dataChannel) {
+      throw new Error('Data channel not initialized');
+    }
+
+    if (this.dataChannel.readyState === 'open') {
+      return;
+    }
+
+    // Create new promise if doesn't exist
+    if (!this.dataChannelOpenPromise) {
+      this.dataChannelOpenPromise = new Promise((resolve, reject) => {
+        this.dataChannelResolve = resolve;
+
+        // Add timeout
+        setTimeout(() => {
+          if (this.dataChannel?.readyState !== 'open') {
+            reject(new Error('Data channel connection timeout'));
+          }
+        }, this.connectionTimeout);
+      });
+    }
+
+    return this.dataChannelOpenPromise;
+  }
+
+
   private setupDataChannel(): void {
-    if (!this.dataChannel) return;
+    if (!this.dataChannel) {
+      console.error('Setup called with null data channel');
+      return;
+    }
+
+    console.log('Setting up data channel...');
 
     this.dataChannel.onopen = () => {
-      console.log("Data channel opened");
-      this.connectionState = "connected";
-      this.emit("connectionState", { state: "connected" });
+      console.log('Data channel opened, current state:', this.dataChannel?.readyState);
+      if (this.dataChannelResolve) {
+        this.dataChannelResolve();
+        this.dataChannelResolve = null;
+      }
     };
 
     this.dataChannel.onclose = () => {
-      console.log("Data channel closed");
-      this.connectionState = "failed";
-      this.emit("connectionState", { state: "disconnected" });
+      console.log('Data channel closed');
+      this.dataChannelOpenPromise = null;
+      this.dataChannelResolve = null;
+    };
+
+    this.dataChannel.onerror = (error) => {
+      console.error('Data channel error:', error);
+      this.emit('error', { message: 'Data channel error', error });
     };
 
     this.dataChannel.onmessage = async (event) => {
       try {
         const message = JSON.parse(event.data);
-        if (message.type === "frame_token") {
+        if (message.type === 'frame_token') {
           await this.handleFrameToken(message);
         }
       } catch (error) {
-        console.error("Error handling data channel message:", error);
+        console.error('Error handling data channel message:', error);
       }
     };
+
+    console.log('Data channel setup complete, current state:', this.dataChannel.readyState);
   }
+
+  public isConnected(): boolean {
+    return (
+      this.dataChannel?.readyState === 'open' &&
+      this.peerConnection?.connectionState === 'connected'
+    );
+  }
+
 }
 
 export default RTCNeuralCodec;

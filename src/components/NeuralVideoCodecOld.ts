@@ -890,16 +890,15 @@ class NeuralVideoCodec {
   }
 
   private updateBufferStatus(): void {
-    const bufferHealth =
-      (this.frameBuffer.frames.size / this.frameBuffer.capacity) * 100;
-    this.metrics.bufferHealth = bufferHealth;
-
-    this.emit("bufferStatus", {
-      health: bufferHealth,
-      frameCount: this.frameBuffer.frames.size,
-      capacity: this.frameBuffer.capacity,
-    });
-  }
+  const frameCount = this.frameBuffer.frames.size;
+  const capacity = this.frameBuffer.capacity;
+  
+  this.emit("bufferStatus", {
+    frameCount,
+    capacity,
+    type: 'buffer'
+  });
+}
 
   // Metrics and monitoring
   private updateMetrics(): void {

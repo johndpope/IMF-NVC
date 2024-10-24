@@ -17,7 +17,27 @@ const nextConfig = {
   },
 
   async headers() {
-    return [
+    return [{
+      source: '/service-worker.js',
+      headers: [
+        {
+          key: 'Service-Worker-Allowed',
+          value: '/',
+        },
+        {
+          key: 'Cache-Control',
+          value: 'public, max-age=0, must-revalidate',
+        },
+      ],
+    },{
+      source: '/graph_model_client/:path*',
+      headers: [
+        {
+          key: 'Cache-Control',
+          value: 'public, max-age=31536000, immutable',
+        },
+      ],
+    },
       {
         source: '/(.*)',
         headers: [
