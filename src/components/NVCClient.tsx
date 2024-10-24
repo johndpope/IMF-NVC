@@ -88,7 +88,6 @@ const NVCClient = () => {
   const mountedRef = useRef(true);
 
   // Add state for tracking loading phase
-  const [modelProgress, setModelProgress] = useState(0);
   const [initPhase, setInitPhase] = useState<InitPhase>('idle');
 
    // Helper function to check if system is ready
@@ -135,7 +134,7 @@ const NVCClient = () => {
 
       codecRef.current.on('bufferStatus', (status) => {
         if (mountedRef.current && status.type === 'model') {
-          setModelProgress(status.health / 100);
+       
           setProgress(status.health / 100);
         }
       });
@@ -197,7 +196,6 @@ useEffect(() => {
 
       codecRef.current.on('bufferStatus', (status) => {
         if (mountedRef.current && status.type === 'model') {
-          setModelProgress(status.health / 100);
           setProgress(status.health / 100);
         }
       });
@@ -594,7 +592,7 @@ useEffect(() => {
       <div>Current Phase: {initPhase}</div>
       <div>Videos Loaded: {videos.length > 0 ? '✅' : '❌'}</div>
       <div>Processing: {isLoading ? '⏳' : '✅'}</div>
-      <div>Model Progress: {(modelProgress * 100).toFixed(1)}%</div>
+      <div>Model Progress: {(progress * 100).toFixed(1)}%</div>
       {error && <div className="text-red-500">Error: {error}</div>}
     </div>
   );
@@ -603,7 +601,7 @@ useEffect(() => {
     <Card className="w-full max-w-2xl">
        <DebugPanel/> 
        <ProgressBar
-          progress={modelProgress}
+          progress={progress}
           message={progressMessage}
           isVisible={initPhase !== 'complete' && initPhase !== 'error'}
           phase={initPhase}

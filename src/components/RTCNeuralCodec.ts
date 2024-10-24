@@ -56,8 +56,14 @@ interface RTCConfig {
   fps: number;
 }
 
+interface SplitReferenceFeatures {
+  tensors: tfjs.Tensor4D[];
+  splitDim: number;
+  originalShape: number[];
+}
+
 interface ReferenceData {
-  features: tfjs.Tensor4D[]; // Store pre-converted tensors
+  features: SplitReferenceFeatures[]; // Store split feature tensors
   token: number[];
   shapes: number[][];
 }
@@ -101,7 +107,6 @@ interface CodecMetrics {
   lastUpdate: number;
 }
 
-
 // Add new types for bulk token operations
 interface BulkTokenResponse {
   videoId: number;
@@ -119,7 +124,11 @@ interface BatchProcessingResult {
   imageUrl: string;
 }
 
-
+enum PlaybackState {
+  PLAYING = "playing",
+  PAUSED = "paused",
+  STOPPED = "stopped",
+}
 // Additional types for event handling and metrics
 type EventCallback = (data: any) => void;
 type EventType = "frameReady" | "error" | "bufferStatus" | "metricsUpdate";
@@ -131,8 +140,8 @@ interface CodecEvents {
   bufferStatus: (data: {
     frameCount?: number;
     capacity?: number;
-    health?: number;  // Add health for model loading progress
-    type?: 'buffer' | 'model' // Add type to distinguish between buffer and model status
+    health?: number; // Add health for model loading progress
+    type?: "buffer" | "model"; // Add type to distinguish between buffer and model status
   }) => void;
   metricsUpdate: (metrics: CodecMetrics) => void;
 }
@@ -155,7 +164,92 @@ abstract class BaseNeuralCodec {
   private frameBuffer: FrameBuffer;
   public currentVideoId: number | null = null;
 
+  public readonly MAX_WEBGPU_BUFFER_SIZE = 4 * 1024 * 1024 * 1024; // 4GB
+  public readonly CHUNK_SIZE = 32; // Process 32 frames at a time
+  public useWebGL = false;
 
+
+  private readonly DEBUG = true;
+private readonly BUFFER_SIZE_LIMIT = 4 * 1024 * 1024 * 1024; // 4GB WebGPU limit
+
+// Helper to calculate tensor size in bytes
+private calculateTensorSize(tensor: tfjs.Tensor): number {
+  const elementSize = 4; // Float32 = 4 bytes
+  return tensor.size * elementSize;
+}
+
+// Debug logger
+private log(message: string, data?: any) {
+  if (this.DEBUG) {
+    console.log(`[RTCNeuralCodec] ${message}`, data);
+  }
+}
+
+// Memory usage tracker
+public async logMemoryUsage(context: string) {
+  const tf = await import("@tensorflow/tfjs");
+  const memory = tf.memory();
+  this.log(`Memory Usage (${context}):`, {
+    numTensors: memory.numTensors,
+    numBytes: memory.numBytes / (1024 * 1024) + ' MB',
+    numDataBuffers: memory.numDataBuffers,
+    backend: tf.getBackend()
+  });
+}
+
+// Tensor size checker
+public checkTensorSize(tensor: tfjs.Tensor, name: string): void {
+  const sizeInBytes = this.calculateTensorSize(tensor);
+  this.log(`Tensor Size Check - ${name}:`, {
+    shape: tensor.shape,
+    size: tensor.size,
+    sizeInBytes: (sizeInBytes / (1024 * 1024)).toFixed(2) + ' MB',
+    sizeInGB: (sizeInBytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB',
+    exceedsLimit: sizeInBytes > this.BUFFER_SIZE_LIMIT
+  });
+}
+
+  // Add method to check tensor memory usage
+  public async getMemoryInfo(): Promise<{ [key: string]: number }> {
+    const tf = await import("@tensorflow/tfjs");
+    return {
+      numTensors: tf.memory().numTensors,
+      numBytes: tf.memory().numBytes,
+      numDataBuffers: tf.memory().numDataBuffers,
+    };
+  }
+  // Helper method to split large tensors
+  public async splitTensor4D(
+    tensor: tfjs.Tensor4D
+  ): Promise<SplitReferenceFeatures> {
+    const tf = await import("@tensorflow/tfjs");
+    const originalShape = tensor.shape;
+    const splitDim = Math.max(
+      1,
+      Math.floor((tensor.size * 4) / this.MAX_TENSOR_SIZE)
+    );
+
+    return tf.tidy(() => {
+      // Calculate split size
+      const splitSize = Math.ceil(originalShape[0] / splitDim);
+      const tensors: tfjs.Tensor4D[] = [];
+
+      // Split tensor along first dimension
+      for (let i = 0; i < splitDim; i++) {
+        const start = i * splitSize;
+        const end = Math.min(start + splitSize, originalShape[0]);
+        const slice = tensor.slice([start, 0, 0, 0], [end - start, -1, -1, -1]);
+        // Keep tensor from being disposed by tidy
+        tensors.push(tf.keep(slice as tfjs.Tensor4D));
+      }
+
+      return {
+        tensors,
+        splitDim,
+        originalShape,
+      };
+    });
+  }
   constructor(protected config: CodecConfig) {
     this.metrics = {
       fps: 0,
@@ -176,6 +270,59 @@ abstract class BaseNeuralCodec {
         this.eventListeners.set(event as keyof CodecEvents, new Set());
       }
     );
+  }
+
+  // Add this method to check and setup appropriate backend
+  private async setupTensorflowBackend(): Promise<void> {
+    const tf = await import("@tensorflow/tfjs");
+
+    try {
+      // First try WebGPU
+      await import("@tensorflow/tfjs-backend-webgpu");
+      await tf.setBackend("webgpu");
+      await tf.ready();
+
+      // Configure WebGPU
+      const backend = tf.backend() as any;
+      if (backend.setWebGPUDeviceConfig) {
+        backend.setWebGPUDeviceConfig({
+          devicePixelRatio: 1,
+          maxBufferSize: this.MAX_WEBGPU_BUFFER_SIZE,
+        });
+      }
+
+      this.useWebGL = false;
+      console.log("Using WebGPU backend");
+    } catch (error) {
+      console.warn(
+        "WebGPU not available or buffer size exceeded, falling back to WebGL:",
+        error
+      );
+
+      // Fall back to WebGL
+      try {
+        await tf.setBackend("webgl");
+        await tf.ready();
+
+        // Configure WebGL for memory efficiency
+        const backend = tf.backend() as any;
+        if (backend.setFlags) {
+          backend.setFlags({
+            WEBGL_CPU_FORWARD: true, // Allow CPU fallback
+            WEBGL_SIZE_UPLOAD_UNIFORM: 4, // Reduce uniform buffer size
+            WEBGL_VERSION: 2,
+            WEBGL_FORCE_F16_TEXTURES: false,
+            WEBGL_PACK: true,
+          });
+        }
+
+        this.useWebGL = true;
+        console.log("Using WebGL backend");
+      } catch (glError) {
+        console.error("WebGL initialization failed:", glError);
+        throw new Error("No suitable backend available");
+      }
+    }
   }
 
   // Common event handling methods
@@ -216,61 +363,40 @@ abstract class BaseNeuralCodec {
 
   // Common methods that can be used by subclasses
   async initModel(modelPath: string): Promise<void> {
+    const tf = await import("@tensorflow/tfjs");
+
     try {
-      const tf = await import("@tensorflow/tfjs");
-      await import("@tensorflow/tfjs-backend-webgpu");
-
-      const webGPUConfig = {
-        devicePixelRatio: 1,
-        maxBufferSize: 1000000000,
-      };
-
       // Initial progress update
       this.emit("bufferStatus", {
         health: 0,
-        type: 'model'
+        type: "model",
       });
 
-      // Setup backend
-      try {
-        await tf.setBackend("webgpu");
-        await tf.ready();
-        const backend = tf.backend() as any;
-        if (backend.setWebGPUDeviceConfig) {
-          backend.setWebGPUDeviceConfig(webGPUConfig);
-        }
-      } catch (error) {
-        console.warn("WebGPU not available, falling back to WebGL");
-        await tf.setBackend("webgl");
-        await tf.ready();
-      }
+      // Setup appropriate backend
+      await this.setupTensorflowBackend();
 
       // Load model with explicit progress tracking
       this.model = await tf.loadGraphModel(modelPath, {
         onProgress: (fraction) => {
-          // Convert fraction to percentage and emit progress
           const progressPercent = Math.round(fraction * 100);
           console.log(`Model loading progress: ${progressPercent}%`);
-          // Emit progress update
           this.emit("bufferStatus", {
             health: progressPercent,
-            type: 'model'
+            type: "model",
           });
-        }
+        },
       });
 
       // Final progress update
       this.emit("bufferStatus", {
         health: 100,
-        type: 'model'
+        type: "model",
       });
       console.log("Model loaded successfully");
-
     } catch (error) {
-      // Error handling with progress reset
       this.emit("bufferStatus", {
         health: 0,
-        type: 'model'
+        type: "model",
       });
       console.error("Error initializing model:", error);
       throw error;
@@ -293,170 +419,112 @@ abstract class BaseNeuralCodec {
   }
 
   public async processFrame(frameToken: FrameToken): Promise<void> {
-
-    
-    // Early checks
-    if (!this.model) {
-      throw new Error("Model not initialized");
-    }
-    if (!this.currentVideoId) {
-      throw new Error("currentVideoId not initialized");
-    }
-    const refData = this.referenceData.get(this.currentVideoId);
-    if (!refData) {
-      throw new Error("Reference data not loaded");
-    }
-
-    // Initialize tensors array at method start
+    const tf = await import("@tensorflow/tfjs");
     const tensorsToDispose: tfjs.Tensor[] = [];
 
-
-
     try {
-      const tf = await import("@tensorflow/tfjs");
-
-      // Verify token shape before creating tensor
-      console.log("Token verification:", {
-        length: frameToken.token.length,
-        expectedLength: 32,
-        preview: Array.from(frameToken.token.slice(0, 5))
-      });
-
-      if (frameToken.token.length !== 32) {
-        throw new Error(`Invalid token length: ${frameToken.token.length}, expected 32`);
+      // Validate model and reference data
+      if (!this.model || !this.currentVideoId) {
+        throw new Error("Model or video not initialized");
       }
 
-      // Create token tensor
-      const currentToken = tf.tensor2d([Array.from(frameToken.token)], [1, 32])
-        .asType("float32");
+      const refData = this.referenceData.get(this.currentVideoId);
+      if (!refData) {
+        throw new Error("Reference data not loaded");
+      }
+
+      // Create and validate input tensor
+      const currentToken = tf.tidy(() =>
+        tf.tensor2d([Array.from(frameToken.token)], [1, 32]).asType("float32")
+      );
       tensorsToDispose.push(currentToken);
 
-      // Verify tensor creation
-      console.log("Created tensor:", {
-        shape: currentToken.shape,
-        dtype: currentToken.dtype,
-        dataPreview: Array.from(await currentToken.data()).slice(0, 5)
-      });
+      if (!this.validateTensor(currentToken, "input token")) {
+        throw new Error("Invalid input tensor");
+      }
 
-      // Debug log the token before creating tensor
-      console.log("Processing frame:", {
-        frameIndex: frameToken.frameIndex,
-        tokenLength: frameToken.token.length,
-        tokenPreview: Array.from(frameToken.token.slice(0, 5)),
-        expectedShape: [1, 32]
-      });
+      // Process features
+      let finalOutput: tfjs.Tensor | null = null;
 
+      for (let i = 0; i < refData.features.length; i++) {
+        const splitFeature = refData.features[i];
 
-
-      // Debug log reference features
-      console.log("Reference features:", {
-        feature0Shape: refData.features[0].shape,
-        feature1Shape: refData.features[1].shape,
-        feature2Shape: refData.features[2].shape,
-        feature3Shape: refData.features[3].shape
-      });
-
-      // Execute model using pre-converted reference features
-      const outputTensor = tf.tidy(() => {
-        try {
-          const inputDict = {
-            "args_0:0": currentToken,
-            "args_0_1:0": currentToken,
-            args_0_2: refData.features[0],
-            args_0_3: refData.features[1],
-            args_0_4: refData.features[2],
-            args_0_5: refData.features[3],
-          };
-
-          // Debug log input shapes
-          console.log("Model inputs:", {
-            args_0_shape: inputDict["args_0:0"].shape,
-            args_0_1_shape: inputDict["args_0_1:0"].shape,
-            args_0_2_shape: inputDict.args_0_2.shape,
-            args_0_3_shape: inputDict.args_0_3.shape,
-            args_0_4_shape: inputDict.args_0_4.shape,
-            args_0_5_shape: inputDict.args_0_5.shape,
-          });
-
-          const result = this.model!.execute(inputDict);
-          tensorsToDispose.push(result as tfjs.Tensor);
-          return result;
-        } catch (execError) {
-          console.error("Model execution error:", execError);
-          console.error("Model info:", {
-            inputSignature: this.model!.inputs.map(i => ({
-              name: i.name,
-              shape: i.shape
-            })),
-            outputSignature: this.model!.outputs.map(o => ({
-              name: o.name,
-              shape: o.shape
-            }))
-          });
-          throw execError;
+        // Validate each reference tensor before use
+        for (const featureTensor of splitFeature.tensors) {
+          if (!this.validateTensor(featureTensor, `reference feature ${i}`)) {
+            throw new Error(`Invalid reference tensor at index ${i}`);
+          }
         }
-      });
 
-      // Debug log the output tensor
-      console.log("Model output:", {
-        shape: outputTensor.shape,
-        dtype: outputTensor.dtype
-      });
+        const partialOutputs = await Promise.all(
+          splitFeature.tensors.map((featureTensor) =>
+            tf.tidy(() => {
+              const inputDict = {
+                "args_0:0": currentToken,
+                "args_0_1:0": currentToken,
+                [`args_0_${i + 2}`]: featureTensor,
+              };
+              return this.model!.execute(inputDict) as tfjs.Tensor;
+            })
+          )
+        );
 
-      // Process output tensor
+        // Combine outputs and clean up
+        const combinedOutput = tf.tidy(() => {
+          if (partialOutputs.length === 1) return tf.keep(partialOutputs[0]);
+          const result = tf.concat(partialOutputs, 0);
+          return tf.keep(result);
+        });
+
+        partialOutputs.forEach((t) => t.dispose());
+
+        if (!finalOutput) {
+          finalOutput = combinedOutput;
+        } else {
+          const newOutput = tf.tidy(() => {
+            const result = tf.add(finalOutput!, combinedOutput);
+            return tf.keep(result);
+          });
+          finalOutput.dispose();
+          combinedOutput.dispose();
+          finalOutput = newOutput;
+        }
+      }
+
+      // Process final output
+      if (!finalOutput || !this.validateTensor(finalOutput, "final output")) {
+        throw new Error("Invalid final output tensor");
+      }
+
       const processedTensor = tf.tidy(() => {
-        let tensor = outputTensor as tfjs.Tensor;
+        let tensor = finalOutput!;
         if (tensor.shape[1] === 3) {
           tensor = tf.transpose(tensor, [0, 2, 3, 1]);
         }
         tensor = tensor.squeeze([0]);
-        return tf.clipByValue(tensor, 0, 1);
-      });
-      tensorsToDispose.push(processedTensor);
-
-      // Debug log final processed tensor
-      console.log("Processed output:", {
-        shape: processedTensor.shape,
-        dtype: processedTensor.dtype
+        return tf.keep(tf.clipByValue(tensor, 0, 1));
       });
 
-      // Convert to image
+      // Draw result and emit
       const canvas = document.createElement("canvas");
       canvas.width = processedTensor.shape[1];
       canvas.height = processedTensor.shape[0];
-
       await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
 
-      // Add to frame buffer
-      this.frameBuffer.frames.set(frameToken.frameIndex, {
-        timestamp: Date.now(),
-        data: canvas.toDataURL(),
-      });
-
-      // Manage buffer size
-      if (this.frameBuffer.frames.size > this.frameBuffer.capacity) {
-        const oldestFrame = Math.min(...this.frameBuffer.frames.keys());
-        this.frameBuffer.frames.delete(oldestFrame);
-      }
-
-      // Emit frame ready event
       this.emit("frameReady", {
         frameIndex: frameToken.frameIndex,
         imageUrl: canvas.toDataURL(),
       });
 
+      // Clean up final tensors
+      if (finalOutput) finalOutput.dispose();
+      processedTensor.dispose();
     } catch (error) {
       console.error("Error processing frame:", error);
-      console.error("Token details at error:", {
-        frameIndex: frameToken.frameIndex,
-        tokenLength: frameToken.token.length,
-        tokenPreview: Array.from(frameToken.token.slice(0, 5))
-      });
       throw error;
     } finally {
-      // Clean up tensors
-      console.log(`Cleaning up ${tensorsToDispose.length} tensors`);
-      tensorsToDispose.forEach(tensor => {
+      // Clean up tracked tensors
+      tensorsToDispose.forEach((tensor) => {
         if (tensor && !tensor.isDisposed) {
           tensor.dispose();
         }
@@ -464,63 +532,112 @@ abstract class BaseNeuralCodec {
     }
   }
 
+  // Update the reference data processing methods in RTCNeuralCodec class
+
+  private async splitTensor4D(
+    tensor: tfjs.Tensor4D
+  ): Promise<SplitReferenceFeatures> {
+    const tf = await import("@tensorflow/tfjs");
+    const originalShape = tensor.shape;
+    const splitDim = Math.max(
+      1,
+      Math.floor((tensor.size * 4) / this.MAX_TENSOR_SIZE)
+    );
+
+    return tf.tidy(() => {
+      // Calculate split size
+      const splitSize = Math.ceil(originalShape[0] / splitDim);
+      const tensors: tfjs.Tensor4D[] = [];
+
+      // Split tensor along first dimension
+      for (let i = 0; i < splitDim; i++) {
+        const start = i * splitSize;
+        const end = Math.min(start + splitSize, originalShape[0]);
+        const slice = tensor.slice([start, 0, 0, 0], [end - start, -1, -1, -1]);
+        // Keep tensor from being disposed by tidy
+        tensors.push(tf.keep(slice as tfjs.Tensor4D));
+      }
+
+      return {
+        tensors,
+        splitDim,
+        originalShape,
+      };
+    });
+  }
+
   public async loadReferenceData(videoId: number): Promise<void> {
+    const tf = await import("@tensorflow/tfjs");
+    await this.logMemoryUsage('Before loading reference data');
+    
     try {
       const response = await fetch(
         `https://192.168.1.108:8000/videos/${videoId}/reference`,
         {
           credentials: "same-origin",
-          headers: {
-            Accept: "application/json",
-          },
+          headers: { Accept: "application/json" },
         }
       );
-
+  
       if (!response.ok) {
         throw new Error(`Failed to fetch reference data: ${response.statusText}`);
       }
-
+  
       const data = await response.json();
-
-      // Debug log the received reference data
-      console.log("Received reference data:", {
-        dataShapes: data.shapes,
-        tokenLength: data.reference_token.length,
-        tokenPreview: data.reference_token.slice(0, 5),
-        featureShapes: data.reference_features.map((f: any[]) =>
-          `[${f.length}, ${f[0].length}, ${f[0][0].length}, ${f[0][0][0].length}]`
-        )
+      
+      this.log('Reference Data Stats:', {
+        numFeatures: data.reference_features.length,
+        featureSizes: data.reference_features.map((f: any[]) => ({
+          dimensions: [f.length, f[0].length, f[0][0].length, f[0][0][0].length],
+          totalElements: f.length * f[0].length * f[0][0].length * f[0][0][0].length,
+          estimatedSizeInMB: (f.length * f[0].length * f[0][0].length * f[0][0][0].length * 4 / (1024 * 1024)).toFixed(2)
+        }))
       });
-
-      const tf = await import("@tensorflow/tfjs");
+  
       const shapes = [
         [1, 128, 64, 64],
         [1, 256, 32, 32],
         [1, 512, 16, 16],
         [1, 512, 8, 8],
       ];
-
-      const featureTensors = data.reference_features.map(
-        (feature: number[][][], idx: number) => {
-          const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
-          console.log(`Feature tensor ${idx}:`, {
-            shape: tensor.shape,
-            dtype: tensor.dtype
-          });
-          return tensor;
+  
+      // Create tensors with size checking
+      const features = await Promise.all(data.reference_features.map(async (feature: number[][][], idx: number) => {
+        const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
+        this.checkTensorSize(tensor, `Reference Feature ${idx}`);
+        
+        // Split if too large
+        if (this.calculateTensorSize(tensor) > this.BUFFER_SIZE_LIMIT) {
+          this.log(`Splitting large tensor ${idx}`, { shape: tensor.shape });
+          // Calculate split size to stay under buffer limit
+          const numSplits = Math.ceil(this.calculateTensorSize(tensor) / (this.BUFFER_SIZE_LIMIT / 2));
+          const splitSize = Math.ceil(tensor.shape[0] / numSplits);
+          
+          const splits = [];
+          for (let i = 0; i < numSplits; i++) {
+            const start = i * splitSize;
+            const size = Math.min(splitSize, tensor.shape[0] - start);
+            const split = tensor.slice([start, 0, 0, 0], [size, -1, -1, -1]);
+            splits.push(split);
+            this.checkTensorSize(split, `Split ${i} of Feature ${idx}`);
+          }
+          tensor.dispose();
+          return splits;
         }
-      );
-
+        
+        return [tensor];
+      }));
+  
+      await this.logMemoryUsage('After creating reference tensors');
+  
       this.referenceData.set(videoId, {
-        features: featureTensors,
+        features,
         token: data.reference_token,
         shapes,
       });
-
-      console.log(`Reference data loaded for video ${videoId}`);
+  
     } catch (error) {
       console.error("Error loading reference data:", error);
-      this.cleanupReferenceTensors(videoId);
       throw error;
     }
   }
@@ -528,13 +645,26 @@ abstract class BaseNeuralCodec {
   public cleanupReferenceTensors(videoId: number): void {
     const refData = this.referenceData.get(videoId);
     if (refData) {
-      refData.features.forEach((tensor) => {
-        if (tensor && !tensor.isDisposed) {
-          tensor.dispose();
-        }
+      refData.features.forEach((splitFeature) => {
+        splitFeature.tensors.forEach((tensor) => {
+          if (tensor && !tensor.isDisposed) {
+            tensor.dispose();
+          }
+        });
       });
       this.referenceData.delete(videoId);
     }
+  }
+
+  // Add helper method to validate tensor state
+  private validateTensor(tensor: tfjs.Tensor, context: string): boolean {
+    if (!tensor || tensor.isDisposed) {
+      console.error(
+        `Invalid tensor in ${context}: ${tensor ? "disposed" : "null"}`
+      );
+      return false;
+    }
+    return true;
   }
 }
 
@@ -555,7 +685,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   private retryTimeout: NodeJS.Timeout | null = null;
   private isReconnecting = false;
 
-
   private dataChannelOpenPromise: Promise<void> | null = null;
   private dataChannelResolve: (() => void) | null = null;
   private connectionTimeout: number = 10000; // 10 seconds timeout
@@ -565,7 +694,17 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   private isCleaningUp = false;
   private tokenCache: Map<number, Map<number, number[]>> = new Map();
   private batchSize: number = 4; // Configurable batch size for processing
- 
+
+  // Add state tracking
+  private playbackState: PlaybackState = PlaybackState.STOPPED;
+  private pausedAt: number | null = null;
+  private lastFrameIndex: number | null = null;
+
+  private readonly MAX_TENSOR_SIZE = 1024 * 1024 * 1024; // 1GB per tensor
+  private readonly SPLIT_SIZE = 32; // Split tensors into chunks of this size
+
+
+
 
   constructor(config: RTCConfig) {
     super(config);
@@ -654,7 +793,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       tokenPreview: token.slice(0, 5),
       tokenType: typeof token,
       isArray: Array.isArray(token),
-      fullToken: token // temporary for debugging
+      fullToken: token, // temporary for debugging
     });
 
     // Flatten nested arrays if needed
@@ -673,39 +812,55 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     console.log("Flattened token:", {
       length: flatToken.length,
       preview: flatToken.slice(0, 5),
-      isArray: Array.isArray(flatToken)
+      isArray: Array.isArray(flatToken),
     });
 
     try {
-      // Process frame and add to processing queue
-      const processPromise = this.processFrame({
+      // Flatten token if needed
+      const flatToken = Array.isArray(token[0]) ? token.flat() : token;
+
+      // Process single frame
+      await this.processFrame({
         frameIndex,
-        token: new Float32Array(flatToken)
+        token: new Float32Array(flatToken),
       });
-
-      this.processingQueue.set(frameIndex, processPromise);
-
-      // Clean up queue after processing
-      await processPromise;
-      this.processingQueue.delete(frameIndex);
     } catch (error) {
       console.error("Frame processing error:", error);
-      console.error("Token state at error:", {
-        original: token,
-        flattened: flatToken,
-        lengths: {
-          original: token.length,
-          flattened: flatToken.length
-        }
-      });
       this.metrics.droppedFrames++;
       this.emit("error", {
         message: "Frame processing failed",
         error,
       });
     }
-  }
+    // try {
+    //   // Process frame and add to processing queue
+    //   const processPromise = this.processFrame({
+    //     frameIndex,
+    //     token: new Float32Array(flatToken)
+    //   });
 
+    //   this.processingQueue.set(frameIndex, processPromise);
+
+    //   // Clean up queue after processing
+    //   await processPromise;
+    //   this.processingQueue.delete(frameIndex);
+    // } catch (error) {
+    //   console.error("Frame processing error:", error);
+    //   console.error("Token state at error:", {
+    //     original: token,
+    //     flattened: flatToken,
+    //     lengths: {
+    //       original: token.length,
+    //       flattened: flatToken.length
+    //     }
+    //   });
+    //   this.metrics.droppedFrames++;
+    //   this.emit("error", {
+    //     message: "Frame processing failed",
+    //     error,
+    //   });
+    // }
+  }
 
   private setupAudioElement() {
     // Sync frame processing with audio timing
@@ -727,21 +882,105 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     this.updateMetrics();
   }
 
-  async startPlayback(videoId: number): Promise<void> {
+  /**
+   * Pauses video playback while maintaining the connection
+   * @returns Promise that resolves when playback is paused
+   */
+  public async pause(): Promise<void> {
     try {
+      // Only pause if currently playing
+      if (this.playbackState !== PlaybackState.PLAYING) {
+        return;
+      }
+
+      // Update state
+      this.playbackState = PlaybackState.PAUSED;
+      this.pausedAt = this.audioElement.currentTime;
+      this.lastFrameIndex = Math.floor(this.pausedAt * this.config.fps);
+
+      // Pause audio
+      this.audioElement.pause();
+
+      // Notify peer about pause
+      if (this.dataChannel?.readyState === "open") {
+        this.dataChannel.send(
+          JSON.stringify({
+            type: "playback_control",
+            action: "pause",
+            timestamp: this.pausedAt,
+            frameIndex: this.lastFrameIndex,
+          })
+        );
+      }
+
+      // Update metrics
+      this.emit("metricsUpdate", {
+        ...this.metrics,
+        fps: 0, // FPS is 0 when paused
+      });
+
+      // Emit buffer status update
+      this.emit("bufferStatus", {
+        frameCount: this.lastFrameIndex,
+        capacity: this.frameBuffer.capacity,
+        health: this.metrics.bufferHealth,
+        type: "buffer",
+      });
+    } catch (error) {
+      console.error("Error pausing playback:", error);
+      this.emit("error", { message: "Failed to pause playback", error });
+      throw error;
+    }
+  }
+
+  // Modify startPlayback to handle resume from pause
+  public async startPlayback(videoId: number): Promise<void> {
+    try {
+      // If resuming the same video
+      if (
+        this.currentVideoId === videoId &&
+        this.playbackState === PlaybackState.PAUSED
+      ) {
+        this.playbackState = PlaybackState.PLAYING;
+
+        // Resume from last position
+        if (this.pausedAt !== null) {
+          this.audioElement.currentTime = this.pausedAt;
+        }
+
+        this.audioElement.play();
+
+        // Notify peer about resume
+        if (this.dataChannel?.readyState === "open") {
+          this.dataChannel.send(
+            JSON.stringify({
+              type: "playback_control",
+              action: "resume",
+              timestamp: this.pausedAt,
+              frameIndex: this.lastFrameIndex,
+            })
+          );
+        }
+
+        // Reset pause state
+        this.pausedAt = null;
+        this.lastFrameIndex = null;
+
+        return;
+      }
+
+      // Otherwise start new playback
       this.currentVideoId = videoId;
+      this.playbackState = PlaybackState.PLAYING;
+      this.pausedAt = null;
+      this.lastFrameIndex = null;
 
-      // Load reference data first
+      // Rest of existing startPlayback implementation...
       await this.loadReferenceData(videoId);
-
-      // Prefetch first chunk of tokens (e.g., first 100 frames)
       const prefetchSize = 100;
       await this.fetchBulkTokens(videoId, 0, prefetchSize - 1);
-
-      // Start background token fetching for next chunks
       this.startBackgroundTokenFetching(videoId, prefetchSize);
 
-      // Signal ready to stream
       if (this.dataChannel?.readyState === "open") {
         this.dataChannel.send(
           JSON.stringify({
@@ -757,17 +996,46 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       throw error;
     }
   }
-  
+
+  // Modify stop method to handle state
+  public stop(): void {
+    this.playbackState = PlaybackState.STOPPED;
+    this.pausedAt = null;
+    this.lastFrameIndex = null;
+    this.audioElement.pause();
+    this.currentVideoId = null;
+    this.processingQueue.clear();
+    this.dataChannel?.close();
+    this.peerConnection?.close();
+  }
+
+  // Add method to check if paused
+  public isPaused(): boolean {
+    return this.playbackState === PlaybackState.PAUSED;
+  }
+
+  // Add method to get current playback state
+  public getPlaybackState(): PlaybackState {
+    return this.playbackState;
+  }
+
   // Background token fetching
-  private async startBackgroundTokenFetching(videoId: number, startFrame: number): Promise<void> {
+  private async startBackgroundTokenFetching(
+    videoId: number,
+    startFrame: number
+  ): Promise<void> {
     const chunkSize = 100;
     let currentStart = startFrame;
 
     while (this.isPlaying && this.currentVideoId === videoId) {
       try {
-        await this.fetchBulkTokens(videoId, currentStart, currentStart + chunkSize - 1);
+        await this.fetchBulkTokens(
+          videoId,
+          currentStart,
+          currentStart + chunkSize - 1
+        );
         currentStart += chunkSize;
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Rate limiting
+        await new Promise((resolve) => setTimeout(resolve, 1000)); // Rate limiting
       } catch (error) {
         console.error("Background token fetching error:", error);
         break;
@@ -787,8 +1055,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     console.log("Connection lost, attempting reconnect...");
     this.reconnect();
   }
-
-
 
   private async handleSignalingMessage(event: MessageEvent): Promise<void> {
     if (!this.signalingWs || this.signalingWs.readyState !== WebSocket.OPEN) {
@@ -926,7 +1192,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-
   private async handleConnectionRestart(): Promise<void> {
     try {
       // Close existing connections
@@ -952,7 +1217,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       });
     }
   }
-
 
   // Helper method to ensure cleanup completes
   private async ensureCleanup(): Promise<void> {
@@ -1012,13 +1276,13 @@ class RTCNeuralCodec extends BaseNeuralCodec {
             await this.initializeSignaling();
 
             // Wait for data channel to be ready
-            console.log('Waiting for data channel to open...');
+            console.log("Waiting for data channel to open...");
             await this.waitForDataChannel();
-            console.log('Data channel opened successfully');
+            console.log("Data channel opened successfully");
 
             resolve();
           } catch (error) {
-            console.error('Connection setup failed:', error);
+            console.error("Connection setup failed:", error);
             reject(error);
             await this.handleReconnect();
           }
@@ -1038,137 +1302,156 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       throw error;
     }
   }
+  // Update the processBatchTokens method in RTCNeuralCodec class
+
   private async processBatchTokens(tokens: FrameToken[]): Promise<void> {
-    if (!this.model || !this.currentVideoId) {
-      throw new Error("Model or video not initialized");
-    }
-
-    const refData = this.referenceData.get(this.currentVideoId);
-    if (!refData) {
-      throw new Error("Reference data not loaded");
-    }
-
     const tf = await import("@tensorflow/tfjs");
-    const tensorsToDispose: tfjs.Tensor[] = [];
-
-    try {
-      // Process tokens one at a time but reuse reference features
-      const sharedFeatures = refData.features; // No need to tile since we're processing one at a time
-
-      // Process each token
-      for (const tokenData of tokens) {
-        // Create single token tensor
-        const currentToken = tf.tidy(() => {
-          return tf.tensor2d([Array.from(tokenData.token)], [1, 32]).asType("float32");
+    await this.logMemoryUsage('Start of batch processing');
+    
+    for (const tokenData of tokens) {
+      try {
+        // Log token details
+        this.log('Processing token', {
+          frameIndex: tokenData.frameIndex,
+          tokenSize: tokenData.token.length,
         });
-        tensorsToDispose.push(currentToken);
-
-        // Execute model for single token
-        const output = tf.tidy(() => {
+  
+        const currentToken = tf.tensor2d([Array.from(tokenData.token)], [1, 32]);
+        this.checkTensorSize(currentToken, 'Input Token');
+  
+        // Get reference features and check sizes
+        const refData = this.referenceData.get(this.currentVideoId!);
+        refData!.features.forEach((featureSet, idx) => {
+          featureSet.forEach((tensor, splitIdx) => {
+            this.checkTensorSize(tensor, `Reference Feature ${idx} Split ${splitIdx}`);
+          });
+        });
+  
+        // Execute model with logging
+        const result = await tf.tidy(() => {
           const inputDict = {
             "args_0:0": currentToken,
             "args_0_1:0": currentToken,
-            args_0_2: sharedFeatures[0],
-            args_0_3: sharedFeatures[1],
-            args_0_4: sharedFeatures[2],
-            args_0_5: sharedFeatures[3],
+            "args_0_2": refData!.features[0][0],
+            "args_0_3": refData!.features[1][0],
+            "args_0_4": refData!.features[2][0],
+            "args_0_5": refData!.features[3][0],
           };
-
-          return this.model!.execute(inputDict);
+  
+          this.log('Model execution input sizes', {
+            inputSizes: Object.entries(inputDict).map(([key, tensor]) => ({
+              name: key,
+              shape: tensor.shape,
+              sizeInMB: this.calculateTensorSize(tensor) / (1024 * 1024)
+            }))
+          });
+  
+          const output = this.model!.execute(inputDict);
+          this.checkTensorSize(output as tfjs.Tensor, 'Model Output');
+          return output;
         });
-        tensorsToDispose.push(output as tfjs.Tensor);
-
-        // Process output
-        const processedTensor = tf.tidy(() => {
-          let tensor = output as tfjs.Tensor;
-          if (tensor.shape[1] === 3) {
-            tensor = tf.transpose(tensor, [0, 2, 3, 1]);
-          }
-          tensor = tensor.squeeze([0]);
-          return tf.clipByValue(tensor, 0, 1);
-        });
-        tensorsToDispose.push(processedTensor);
-
-        // Convert to image
-        const canvas = document.createElement("canvas");
-        canvas.width = processedTensor.shape[1];
-        canvas.height = processedTensor.shape[0];
-        await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
-
-        // Emit frame
-        this.emit("frameReady", {
-          frameIndex: tokenData.frameIndex,
-          imageUrl: canvas.toDataURL(),
-        });
-
-        // Clean up tensors after each frame
-        tensorsToDispose.forEach(tensor => {
-          if (tensor && !tensor.isDisposed) tensor.dispose();
-        });
-        tensorsToDispose.length = 0;
-
-        // Give the event loop a chance to run other tasks
-        await new Promise(resolve => setTimeout(resolve, 0));
+  
+        await this.logMemoryUsage('After model execution');
+  
+        // Clean up
+        currentToken.dispose();
+        result.dispose();
+        
+      } catch (error) {
+        this.log('Error in batch processing', { error });
+        throw error;
       }
-
-    } catch (error) {
-      console.error("Error processing tokens:", error);
-      console.error("Token state at error:", {
-        tokens: tokens.map(t => ({
-          frameIndex: t.frameIndex,
-          tokenLength: t.token.length,
-          tokenSample: Array.from(t.token.slice(0, 5))
-        }))
-      });
-      throw error;
-    } finally {
-      // Final cleanup
-      tensorsToDispose.forEach(tensor => {
-        if (tensor && !tensor.isDisposed) tensor.dispose();
-      });
     }
+    
+    await this.logMemoryUsage('End of batch processing');
   }
 
-  // Modified processTokenBatch to process in smaller chunks
+  // Update processTokenBatch for better error handling
   private async processTokenBatch(videoTokens: Map<number, number[]>) {
     const batchTokens: FrameToken[] = [];
-    
+
     console.log("Processing token batch:", {
       numTokens: videoTokens.size,
-      sampleToken: Array.from(videoTokens.values())[0]?.slice(0, 5)
+      sampleToken: Array.from(videoTokens.values())[0]?.slice(0, 5),
     });
 
-    // Convert tokens to FrameToken format
-    for (const [frameIndex, token] of videoTokens.entries()) {
-      // Ensure token is properly formatted
-      const formattedToken = Array.isArray(token[0]) ? token.flat() : token;
-      batchTokens.push({
-        frameIndex,
-        token: new Float32Array(formattedToken)
-      });
-    }
+    try {
+      // Convert tokens to FrameToken format
+      for (const [frameIndex, token] of videoTokens.entries()) {
+        // Ensure token is properly formatted
+        const formattedToken = Array.isArray(token[0]) ? token.flat() : token;
 
-    // Process in smaller chunks to manage memory
-    const CHUNK_SIZE = 10; // Process 10 frames at a time
-    for (let i = 0; i < batchTokens.length; i += CHUNK_SIZE) {
-      const chunk = batchTokens.slice(i, i + CHUNK_SIZE);
-      await this.processBatchTokens(chunk);
+        // Verify token length
+        if (formattedToken.length !== 32) {
+          console.error(`Invalid token length for frame ${frameIndex}:`, {
+            length: formattedToken.length,
+            expected: 32,
+            token: formattedToken.slice(0, 5),
+          });
+          continue;
+        }
 
-      // Update progress
-      this.emit("bufferStatus", {
-        frameCount: i + chunk.length,
-        capacity: batchTokens.length,
-        health: ((i + chunk.length) / batchTokens.length) * 100
-      });
+        batchTokens.push({
+          frameIndex,
+          token: new Float32Array(formattedToken),
+        });
+      }
 
-      // Allow UI updates between chunks
-      await new Promise(resolve => setTimeout(resolve, 10));
+      // Process in smaller chunks
+      const CHUNK_SIZE = 10;
+      for (let i = 0; i < batchTokens.length; i += CHUNK_SIZE) {
+        const chunk = batchTokens.slice(i, i + CHUNK_SIZE);
+        await this.processBatchTokens(chunk);
+
+        // Update progress
+        this.emit("bufferStatus", {
+          frameCount: i + chunk.length,
+          capacity: batchTokens.length,
+          health: ((i + chunk.length) / batchTokens.length) * 100,
+        });
+
+        // Allow UI updates between chunks
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+    } catch (error) {
+      console.error("Error in batch processing:", error);
+      throw error;
     }
   }
 
+  // Add method to validate model inputs
+  private validateModelInputs(inputDict: {
+    [key: string]: tfjs.Tensor;
+  }): boolean {
+    const expectedInputs = this.model!.inputs.map((i) => i.name);
+    const providedInputs = Object.keys(inputDict);
+
+    const missingInputs = expectedInputs.filter(
+      (name) => !providedInputs.includes(name)
+    );
+    const extraInputs = providedInputs.filter(
+      (name) => !expectedInputs.includes(name)
+    );
+
+    if (missingInputs.length > 0 || extraInputs.length > 0) {
+      console.error("Model input mismatch:", {
+        missing: missingInputs,
+        extra: extraInputs,
+        expected: expectedInputs,
+        provided: providedInputs,
+      });
+      return false;
+    }
+
+    return true;
+  }
 
   // Modify fetchBulkTokens to use new batch processing
-  async fetchBulkTokens(videoId: number, startFrame: number, endFrame: number): Promise<void> {
+  async fetchBulkTokens(
+    videoId: number,
+    startFrame: number,
+    endFrame: number
+  ): Promise<void> {
     try {
       const response = await fetch(
         `https://192.168.1.108:8000/videos/${videoId}/tokens?start=${startFrame}&end=${endFrame}`,
@@ -1185,7 +1468,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       }
 
       const data: BulkTokenResponse = await response.json();
-      
+
       // Store tokens in cache
       const videoTokens = new Map<number, number[]>();
       Object.entries(data.tokens).forEach(([frameIndex, token]) => {
@@ -1198,9 +1481,9 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       this.emit("bufferStatus", {
         frameCount: Object.keys(data.tokens).length,
         capacity: endFrame - startFrame + 1,
-        health: (data.metadata.processedFrames / data.metadata.totalFrames) * 100
+        health:
+          (data.metadata.processedFrames / data.metadata.totalFrames) * 100,
       });
-
     } catch (error) {
       console.error("Error fetching bulk tokens:", error);
       throw error;
@@ -1330,7 +1613,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
 
     this.isCleaningUp = true;
-    console.log('Starting codec cleanup...', { preserveModel });
+    console.log("Starting codec cleanup...", { preserveModel });
 
     try {
       // Clear any pending retry timeout
@@ -1396,11 +1679,11 @@ class RTCNeuralCodec extends BaseNeuralCodec {
           this.model = null;
           this.modelInitialized = false;
         } catch (error) {
-          console.warn('Error disposing model:', error);
+          console.warn("Error disposing model:", error);
         }
       }
 
-      console.log('Codec cleanup completed');
+      console.log("Codec cleanup completed");
     } finally {
       this.isCleaningUp = false;
     }
@@ -1460,7 +1743,10 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     };
 
     this.peerConnection.oniceconnectionstatechange = () => {
-      console.log("ICE connection state:", this.peerConnection?.iceConnectionState);
+      console.log(
+        "ICE connection state:",
+        this.peerConnection?.iceConnectionState
+      );
       if (this.peerConnection?.iceConnectionState === "failed") {
         this.handleICEFailure();
       }
@@ -1533,10 +1819,10 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   // Add connection state tracking
   private async waitForDataChannel(): Promise<void> {
     if (!this.dataChannel) {
-      throw new Error('Data channel not initialized');
+      throw new Error("Data channel not initialized");
     }
 
-    if (this.dataChannel.readyState === 'open') {
+    if (this.dataChannel.readyState === "open") {
       return;
     }
 
@@ -1547,8 +1833,8 @@ class RTCNeuralCodec extends BaseNeuralCodec {
 
         // Add timeout
         setTimeout(() => {
-          if (this.dataChannel?.readyState !== 'open') {
-            reject(new Error('Data channel connection timeout'));
+          if (this.dataChannel?.readyState !== "open") {
+            reject(new Error("Data channel connection timeout"));
           }
         }, this.connectionTimeout);
       });
@@ -1557,17 +1843,19 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     return this.dataChannelOpenPromise;
   }
 
-
   private setupDataChannel(): void {
     if (!this.dataChannel) {
-      console.error('Setup called with null data channel');
+      console.error("Setup called with null data channel");
       return;
     }
 
-    console.log('Setting up data channel...');
+    console.log("Setting up data channel...");
 
     this.dataChannel.onopen = () => {
-      console.log('Data channel opened, current state:', this.dataChannel?.readyState);
+      console.log(
+        "Data channel opened, current state:",
+        this.dataChannel?.readyState
+      );
       if (this.dataChannelResolve) {
         this.dataChannelResolve();
         this.dataChannelResolve = null;
@@ -1575,37 +1863,40 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     };
 
     this.dataChannel.onclose = () => {
-      console.log('Data channel closed');
+      console.log("Data channel closed");
       this.dataChannelOpenPromise = null;
       this.dataChannelResolve = null;
     };
 
     this.dataChannel.onerror = (error) => {
-      console.error('Data channel error:', error);
-      this.emit('error', { message: 'Data channel error', error });
+      console.error("Data channel error:", error);
+      this.emit("error", { message: "Data channel error", error });
     };
 
     this.dataChannel.onmessage = async (event) => {
       try {
         const message = JSON.parse(event.data);
-        if (message.type === 'frame_token') {
-          await this.handleFrameToken(message);
-        }
+        console.warn("we got a token.... ignore");
+        // if (message.type === 'frame_token') {
+        //   await this.handleFrameToken(message);
+        // }
       } catch (error) {
-        console.error('Error handling data channel message:', error);
+        console.error("Error handling data channel message:", error);
       }
     };
 
-    console.log('Data channel setup complete, current state:', this.dataChannel.readyState);
+    console.log(
+      "Data channel setup complete, current state:",
+      this.dataChannel.readyState
+    );
   }
 
   public isConnected(): boolean {
     return (
-      this.dataChannel?.readyState === 'open' &&
-      this.peerConnection?.connectionState === 'connected'
+      this.dataChannel?.readyState === "open" &&
+      this.peerConnection?.connectionState === "connected"
     );
   }
-
 }
 
 export default RTCNeuralCodec;
