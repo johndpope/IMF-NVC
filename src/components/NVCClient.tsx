@@ -12,7 +12,7 @@ import {
 import  PlaybackControls  from '@/components/ui/playback-controls';
 import { Play, Pause, Square } from 'lucide-react';
 import type * as tfjs from "@tensorflow/tfjs";
-import NeuralVideoCodec from './NeuralVideoCodec';
+import RTCNeuralCodec from './RTCNeuralCodec';
 
 
 interface Video {
@@ -137,10 +137,10 @@ useEffect(() => {
         setShowProgress(true);
         setProgressMessage('Initializing codec...');
         
-        codecRef.current = new NeuralVideoCodec({
-          bufferSize: 30,
-          fps: 30,
-          modelPath: '/graph_model_client/model.json'
+        codecRef.current = new RTCNeuralCodec({
+          serverUrl:'wss://192.168.1.108:8000/ws',
+          fps: 24,
+          iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
 
         // Listen for end of video
@@ -166,7 +166,7 @@ useEffect(() => {
           setProgress(status.health / 100);
         });
 
-        await codecRef.current.init('/graph_model_client/model.json');
+        await codecRef.current.initModel('/graph_model_client/model.json');
         setIsModelLoaded(true); // Set model loaded state here
 
         await codecRef.current.connect('wss://192.168.1.108:8000/ws');

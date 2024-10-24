@@ -190,7 +190,7 @@ abstract class BaseNeuralCodec {
   abstract stop(): void;
 
   // Common methods that can be used by subclasses
-  protected async initModel(modelPath: string): Promise<void> {
+  async initModel(modelPath: string): Promise<void> {
     try {
       const tf = await import("@tensorflow/tfjs");
       await import("@tensorflow/tfjs-backend-webgpu");
