@@ -131,6 +131,7 @@ abstract class BaseNeuralCodec {
   private frameBuffer: FrameBuffer;
   public currentVideoId: number | null = null;
 
+
   constructor(protected config: CodecConfig) {
     this.metrics = {
       fps: 0,
@@ -194,12 +195,16 @@ abstract class BaseNeuralCodec {
     try {
       const tf = await import("@tensorflow/tfjs");
       await import("@tensorflow/tfjs-backend-webgpu");
-
+  
       const webGPUConfig = {
         devicePixelRatio: 1,
         maxBufferSize: 1000000000,
       };
-
+  
+      // Initial progress update
+      this.emit("bufferStatus", { health: 0 });
+  
+      // Setup backend
       try {
         await tf.setBackend("webgpu");
         await tf.ready();
@@ -212,10 +217,25 @@ abstract class BaseNeuralCodec {
         await tf.setBackend("webgl");
         await tf.ready();
       }
-
-      this.model = await tf.loadGraphModel(modelPath);
+  
+      // Load model with explicit progress tracking
+      this.model = await tf.loadGraphModel(modelPath, {
+        onProgress: (fraction) => {
+          // Convert fraction to percentage and emit progress
+          const progressPercent = Math.round(fraction * 100);
+          console.log(`Model loading progress: ${progressPercent}%`);
+          // Emit progress update
+          this.emit("bufferStatus", { health: progressPercent });
+        }
+      });
+  
+      // Final progress update
+      this.emit("bufferStatus", { health: 100 });
       console.log("Model loaded successfully");
+  
     } catch (error) {
+      // Error handling with progress reset
+      this.emit("bufferStatus", { health: 0 });
       console.error("Error initializing model:", error);
       throw error;
     }
@@ -465,7 +485,7 @@ public async loadReferenceData(videoId: number): Promise<void> {
     }
 }
 
-  private cleanupReferenceTensors(videoId: number): void {
+  public cleanupReferenceTensors(videoId: number): void {
     const refData = this.referenceData.get(videoId);
     if (refData) {
       refData.features.forEach((tensor) => {
@@ -1020,18 +1040,20 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  public  async cleanup(): Promise<void> {
+  public async cleanup(): Promise<void> {
+    console.log('Starting codec cleanup...');
+    
     // Clear any pending retry timeout
     if (this.retryTimeout) {
       clearTimeout(this.retryTimeout);
       this.retryTimeout = null;
     }
-
-    // Reset connection state
+  
+    // Reset state flags
     this.isReconnecting = false;
     this.retryCount = 0;
-
-    // Clean up existing connections
+  
+    // Clean up data channel
     if (this.dataChannel) {
       this.dataChannel.onopen = null;
       this.dataChannel.onclose = null;
@@ -1039,7 +1061,8 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       this.dataChannel.close();
       this.dataChannel = null;
     }
-
+  
+    // Clean up peer connection
     if (this.peerConnection) {
       this.peerConnection.onicecandidate = null;
       this.peerConnection.oniceconnectionstatechange = null;
@@ -1047,30 +1070,47 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       this.peerConnection.close();
       this.peerConnection = null;
     }
-
+  
+    // Clean up WebSocket
     if (this.signalingWs) {
       this.signalingWs.onopen = null;
       this.signalingWs.onclose = null;
       this.signalingWs.onerror = null;
       this.signalingWs.onmessage = null;
-
+  
       if (this.signalingWs.readyState === WebSocket.OPEN) {
         this.signalingWs.close(1000, "Cleanup");
       }
       this.signalingWs = null;
     }
-
+  
     // Clean up audio
     if (this.audioElement) {
       this.audioElement.pause();
       this.audioElement.srcObject = null;
     }
-
-    // Clear processing queue
+  
+    // Clean up processing queue
     this.processingQueue.clear();
-
-    console.log("Cleanup completed successfully");
+  
+    // Clean up reference data and model
+    if (this.currentVideoId) {
+      this.cleanupReferenceTensors(this.currentVideoId);
+      this.currentVideoId = null;
+    }
+  
+    if (this.model) {
+      try {
+        this.model.dispose();
+      } catch (error) {
+        console.warn('Error disposing model:', error);
+      }
+      this.model = null;
+    }
+  
+    console.log('Codec cleanup completed');
   }
+
   private async initializeSignaling(): Promise<void> {
     if (!this.signalingWs) throw new Error("No signaling connection");
 
