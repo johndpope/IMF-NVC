@@ -547,10 +547,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   private processingQueue = new Map<number, Promise<void>>();
 
   private pendingCandidates: RTCIceCandidate[] = [];
-  private connectionState: "new" | "connecting" | "connected" | "failed" =
-    "new";
-  private reconnectAttempts = 0;
-  private readonly MAX_RECONNECT_ATTEMPTS = 5;
 
   private readonly MAX_RETRY_ATTEMPTS = 5;
   private readonly INITIAL_RETRY_DELAY = 1000; // 1 second
@@ -1042,7 +1038,136 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       throw error;
     }
   }
+  private async processBatchTokens(tokens: FrameToken[]): Promise<void> {
+    if (!this.model || !this.currentVideoId) {
+      throw new Error("Model or video not initialized");
+    }
 
+    const refData = this.referenceData.get(this.currentVideoId);
+    if (!refData) {
+      throw new Error("Reference data not loaded");
+    }
+
+    const tf = await import("@tensorflow/tfjs");
+    const tensorsToDispose: tfjs.Tensor[] = [];
+
+    try {
+      // Process tokens one at a time but reuse reference features
+      const sharedFeatures = refData.features; // No need to tile since we're processing one at a time
+
+      // Process each token
+      for (const tokenData of tokens) {
+        // Create single token tensor
+        const currentToken = tf.tidy(() => {
+          return tf.tensor2d([Array.from(tokenData.token)], [1, 32]).asType("float32");
+        });
+        tensorsToDispose.push(currentToken);
+
+        // Execute model for single token
+        const output = tf.tidy(() => {
+          const inputDict = {
+            "args_0:0": currentToken,
+            "args_0_1:0": currentToken,
+            args_0_2: sharedFeatures[0],
+            args_0_3: sharedFeatures[1],
+            args_0_4: sharedFeatures[2],
+            args_0_5: sharedFeatures[3],
+          };
+
+          return this.model!.execute(inputDict);
+        });
+        tensorsToDispose.push(output as tfjs.Tensor);
+
+        // Process output
+        const processedTensor = tf.tidy(() => {
+          let tensor = output as tfjs.Tensor;
+          if (tensor.shape[1] === 3) {
+            tensor = tf.transpose(tensor, [0, 2, 3, 1]);
+          }
+          tensor = tensor.squeeze([0]);
+          return tf.clipByValue(tensor, 0, 1);
+        });
+        tensorsToDispose.push(processedTensor);
+
+        // Convert to image
+        const canvas = document.createElement("canvas");
+        canvas.width = processedTensor.shape[1];
+        canvas.height = processedTensor.shape[0];
+        await tf.browser.draw(processedTensor as tfjs.Tensor3D, canvas);
+
+        // Emit frame
+        this.emit("frameReady", {
+          frameIndex: tokenData.frameIndex,
+          imageUrl: canvas.toDataURL(),
+        });
+
+        // Clean up tensors after each frame
+        tensorsToDispose.forEach(tensor => {
+          if (tensor && !tensor.isDisposed) tensor.dispose();
+        });
+        tensorsToDispose.length = 0;
+
+        // Give the event loop a chance to run other tasks
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+    } catch (error) {
+      console.error("Error processing tokens:", error);
+      console.error("Token state at error:", {
+        tokens: tokens.map(t => ({
+          frameIndex: t.frameIndex,
+          tokenLength: t.token.length,
+          tokenSample: Array.from(t.token.slice(0, 5))
+        }))
+      });
+      throw error;
+    } finally {
+      // Final cleanup
+      tensorsToDispose.forEach(tensor => {
+        if (tensor && !tensor.isDisposed) tensor.dispose();
+      });
+    }
+  }
+
+  // Modified processTokenBatch to process in smaller chunks
+  private async processTokenBatch(videoTokens: Map<number, number[]>) {
+    const batchTokens: FrameToken[] = [];
+    
+    console.log("Processing token batch:", {
+      numTokens: videoTokens.size,
+      sampleToken: Array.from(videoTokens.values())[0]?.slice(0, 5)
+    });
+
+    // Convert tokens to FrameToken format
+    for (const [frameIndex, token] of videoTokens.entries()) {
+      // Ensure token is properly formatted
+      const formattedToken = Array.isArray(token[0]) ? token.flat() : token;
+      batchTokens.push({
+        frameIndex,
+        token: new Float32Array(formattedToken)
+      });
+    }
+
+    // Process in smaller chunks to manage memory
+    const CHUNK_SIZE = 10; // Process 10 frames at a time
+    for (let i = 0; i < batchTokens.length; i += CHUNK_SIZE) {
+      const chunk = batchTokens.slice(i, i + CHUNK_SIZE);
+      await this.processBatchTokens(chunk);
+
+      // Update progress
+      this.emit("bufferStatus", {
+        frameCount: i + chunk.length,
+        capacity: batchTokens.length,
+        health: ((i + chunk.length) / batchTokens.length) * 100
+      });
+
+      // Allow UI updates between chunks
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+  }
+
+
+  // Modify fetchBulkTokens to use new batch processing
   async fetchBulkTokens(videoId: number, startFrame: number, endFrame: number): Promise<void> {
     try {
       const response = await fetch(
@@ -1061,16 +1186,14 @@ class RTCNeuralCodec extends BaseNeuralCodec {
 
       const data: BulkTokenResponse = await response.json();
       
-      // Initialize video token cache if needed
-      if (!this.tokenCache.has(videoId)) {
-        this.tokenCache.set(videoId, new Map());
-      }
-      
       // Store tokens in cache
-      const videoTokens = this.tokenCache.get(videoId)!;
+      const videoTokens = new Map<number, number[]>();
       Object.entries(data.tokens).forEach(([frameIndex, token]) => {
         videoTokens.set(parseInt(frameIndex), token);
       });
+
+      // Process tokens in batches
+      await this.processTokenBatch(videoTokens);
 
       this.emit("bufferStatus", {
         frameCount: Object.keys(data.tokens).length,
@@ -1083,7 +1206,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       throw error;
     }
   }
-
   private async handleConnectionTimeout(
     reject: (reason?: any) => void
   ): Promise<void> {
