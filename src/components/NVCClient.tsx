@@ -79,7 +79,7 @@ const NVCClient = () => {
 
 
     // Codec reference
-    const codecRef = useRef<NeuralVideoCodec | null>(null);
+    const codecRef = useRef<RTCNeuralCodec | null>(null);
 
       // Add useEffect to manage ready state
   useEffect(() => {
@@ -138,7 +138,7 @@ useEffect(() => {
         setProgressMessage('Initializing codec...');
         
         codecRef.current = new RTCNeuralCodec({
-          serverUrl:'wss://192.168.1.108:8000/ws',
+          serverUrl:'wss://192.168.1.108:8000/rtc',
           fps: 24,
           iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
         });
@@ -169,7 +169,7 @@ useEffect(() => {
         await codecRef.current.initModel('/graph_model_client/model.json');
         setIsModelLoaded(true); // Set model loaded state here
 
-        await codecRef.current.connect('wss://192.168.1.108:8000/ws');
+        await codecRef.current.connect('wss://192.168.1.108:8000/rtc');
         setIsConnected(true); // Set connected state here
 
         setProgressMessage('Fetching videos...');
