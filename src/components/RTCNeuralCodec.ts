@@ -107,6 +107,12 @@ interface CodecMetrics {
   lastUpdate: number;
 }
 
+interface ReferenceFeature {
+  tensor: tfjs.Tensor4D;
+  shape: number[];
+}
+
+
 // Add new types for bulk token operations
 interface BulkTokenResponse {
   videoId: number;
@@ -569,8 +575,13 @@ public checkTensorSize(tensor: tfjs.Tensor, name: string): void {
   public async loadReferenceData(videoId: number): Promise<void> {
     const tf = await import("@tensorflow/tfjs");
     await this.logMemoryUsage('Before loading reference data');
-    
+  
     try {
+      // Clean up existing reference data
+      if (this.currentVideoId) {
+        await this.cleanupReferenceTensors(this.currentVideoId);
+      }
+  
       const response = await fetch(
         `https://192.168.1.108:8000/videos/${videoId}/reference`,
         {
@@ -585,15 +596,6 @@ public checkTensorSize(tensor: tfjs.Tensor, name: string): void {
   
       const data = await response.json();
       
-      this.log('Reference Data Stats:', {
-        numFeatures: data.reference_features.length,
-        featureSizes: data.reference_features.map((f: any[]) => ({
-          dimensions: [f.length, f[0].length, f[0][0].length, f[0][0][0].length],
-          totalElements: f.length * f[0].length * f[0][0].length * f[0][0][0].length,
-          estimatedSizeInMB: (f.length * f[0].length * f[0][0].length * f[0][0][0].length * 4 / (1024 * 1024)).toFixed(2)
-        }))
-      });
-  
       const shapes = [
         [1, 128, 64, 64],
         [1, 256, 32, 32],
@@ -601,63 +603,88 @@ public checkTensorSize(tensor: tfjs.Tensor, name: string): void {
         [1, 512, 8, 8],
       ];
   
-      // Create tensors with size checking
-      const features = await Promise.all(data.reference_features.map(async (feature: number[][][], idx: number) => {
-        const tensor = tf.tensor4d(feature, shapes[idx]).asType("float32");
-        this.checkTensorSize(tensor, `Reference Feature ${idx}`);
-        
-        // Split if too large
-        if (this.calculateTensorSize(tensor) > this.BUFFER_SIZE_LIMIT) {
-          this.log(`Splitting large tensor ${idx}`, { shape: tensor.shape });
-          // Calculate split size to stay under buffer limit
-          const numSplits = Math.ceil(this.calculateTensorSize(tensor) / (this.BUFFER_SIZE_LIMIT / 2));
-          const splitSize = Math.ceil(tensor.shape[0] / numSplits);
-          
-          const splits = [];
-          for (let i = 0; i < numSplits; i++) {
-            const start = i * splitSize;
-            const size = Math.min(splitSize, tensor.shape[0] - start);
-            const split = tensor.slice([start, 0, 0, 0], [size, -1, -1, -1]);
-            splits.push(split);
-            this.checkTensorSize(split, `Split ${i} of Feature ${idx}`);
-          }
-          tensor.dispose();
-          return splits;
-        }
-        
-        return [tensor];
-      }));
+      // Process reference features
+      const features = await this.processReferenceFeatures(data, shapes);
   
-      await this.logMemoryUsage('After creating reference tensors');
-  
+      // Store reference data
       this.referenceData.set(videoId, {
         features,
-        token: data.reference_token,
-        shapes,
+        token: data.reference_token
       });
   
+      this.log('Reference data loaded:', {
+        videoId,
+        numFeatures: features.length,
+        shapes: features.map(f => f.shape)
+      });
+  
+      await this.logMemoryUsage('After loading reference data');
+  
     } catch (error) {
-      console.error("Error loading reference data:", error);
+      console.error('Error loading reference data:', error);
+      this.cleanupReferenceTensors(videoId);
+      throw error;
+    }
+  }
+  public async processReferenceFeatures(data: any, shapes: number[][]): Promise<ReferenceFeature[]> {
+    const tf = await import("@tensorflow/tfjs");
+    const features: ReferenceFeature[] = [];
+  
+    try {
+      this.log('Processing reference features:', {
+        numFeatures: data.reference_features.length,
+        shapes
+      });
+  
+      for (let i = 0; i < data.reference_features.length; i++) {
+        const featureData = data.reference_features[i];
+        const shape = shapes[i];
+  
+        this.log(`Processing feature ${i}:`, {
+          shape,
+          dataSize: featureData.length
+        });
+  
+        // Create and validate tensor
+        const tensor = tf.tidy(() => {
+          const t = tf.tensor4d(featureData, shape).asType("float32");
+          return tf.keep(t); // Keep tensor from being disposed
+        });
+  
+        this.checkTensorSize(tensor, `Reference Feature ${i}`);
+        
+        features.push({
+          tensor,
+          shape
+        });
+      }
+  
+      return features;
+    } catch (error) {
+      // Clean up any created tensors on error
+      features.forEach(f => {
+        if (f.tensor && !f.tensor.isDisposed) {
+          f.tensor.dispose();
+        }
+      });
       throw error;
     }
   }
 
-  public cleanupReferenceTensors(videoId: number): void {
-    const refData = this.referenceData.get(videoId);
-    if (refData) {
-      refData.features.forEach((splitFeature) => {
-        splitFeature.tensors.forEach((tensor) => {
-          if (tensor && !tensor.isDisposed) {
-            tensor.dispose();
-          }
-        });
-      });
-      this.referenceData.delete(videoId);
-    }
+public cleanupReferenceTensors(videoId: number): void {
+  const refData = this.referenceData.get(videoId);
+  if (refData) {
+    refData.features.forEach(feature => {
+      if (feature.tensor && !feature.tensor.isDisposed) {
+        feature.tensor.dispose();
+      }
+    });
+    this.referenceData.delete(videoId);
+    this.log('Cleaned up reference tensors for video:', videoId);
   }
-
+}
   // Add helper method to validate tensor state
-  private validateTensor(tensor: tfjs.Tensor, context: string): boolean {
+private validateTensor(tensor: tfjs.Tensor, context: string): boolean {
     if (!tensor || tensor.isDisposed) {
       console.error(
         `Invalid tensor in ${context}: ${tensor ? "disposed" : "null"}`
@@ -1302,8 +1329,10 @@ class RTCNeuralCodec extends BaseNeuralCodec {
       throw error;
     }
   }
-  // Update the processBatchTokens method in RTCNeuralCodec class
 
+
+ 
+  
   private async processBatchTokens(tokens: FrameToken[]): Promise<void> {
     const tf = await import("@tensorflow/tfjs");
     await this.logMemoryUsage('Start of batch processing');
@@ -1311,59 +1340,143 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     for (const tokenData of tokens) {
       try {
         // Log token details
-        this.log('Processing token', {
+        this.log('Processing token:', {
           frameIndex: tokenData.frameIndex,
-          tokenSize: tokenData.token.length,
+          tokenLength: tokenData.token.length
         });
   
-        const currentToken = tf.tensor2d([Array.from(tokenData.token)], [1, 32]);
-        this.checkTensorSize(currentToken, 'Input Token');
+        if (!this.model || !this.currentVideoId) {
+          throw new Error("Model or video not initialized");
+        }
   
-        // Get reference features and check sizes
-        const refData = this.referenceData.get(this.currentVideoId!);
-        refData!.features.forEach((featureSet, idx) => {
-          featureSet.forEach((tensor, splitIdx) => {
-            this.checkTensorSize(tensor, `Reference Feature ${idx} Split ${splitIdx}`);
-          });
+        const refData = this.referenceData.get(this.currentVideoId);
+        if (!refData || !refData.features) {
+          throw new Error("Reference data not loaded");
+        }
+  
+        // Debug reference features
+        this.log('Reference features:', {
+          numFeatures: refData.features.length,
+          features: refData.features.map((f, i) => ({
+            index: i,
+            tensor: f.tensor ? 'valid' : 'invalid',
+            shape: f.tensor?.shape || 'unknown'
+          }))
         });
   
-        // Execute model with logging
+        // Process token with tensor tracking
         const result = await tf.tidy(() => {
+          // Create input token
+          const currentToken = tf.tensor2d([Array.from(tokenData.token)], [1, 32])
+            .asType("float32");
+  
+          // Create input dictionary using feature tensors
           const inputDict = {
             "args_0:0": currentToken,
             "args_0_1:0": currentToken,
-            "args_0_2": refData!.features[0][0],
-            "args_0_3": refData!.features[1][0],
-            "args_0_4": refData!.features[2][0],
-            "args_0_5": refData!.features[3][0],
+            "args_0_2": refData.features[0].tensor,
+            "args_0_3": refData.features[1].tensor,
+            "args_0_4": refData.features[2].tensor,
+            "args_0_5": refData.features[3].tensor
           };
   
-          this.log('Model execution input sizes', {
-            inputSizes: Object.entries(inputDict).map(([key, tensor]) => ({
-              name: key,
+          // Log input shapes for debugging
+          this.log('Model inputs:', {
+            tokenShape: currentToken.shape,
+            features: Object.entries(inputDict).map(([key, tensor]) => ({
+              key,
               shape: tensor.shape,
-              sizeInMB: this.calculateTensorSize(tensor) / (1024 * 1024)
+              dtype: tensor.dtype
             }))
           });
   
-          const output = this.model!.execute(inputDict);
-          this.checkTensorSize(output as tfjs.Tensor, 'Model Output');
-          return output;
+          // Execute model
+          let output = this.model!.execute(inputDict) as tfjs.Tensor;
+          
+          // Post-process output
+          if (output.shape[1] === 3) {
+            output = tf.transpose(output, [0, 2, 3, 1]);
+          }
+          output = output.squeeze([0]);
+          return tf.clipByValue(output, 0, 1);
         });
   
-        await this.logMemoryUsage('After model execution');
-  
-        // Clean up
-        currentToken.dispose();
-        result.dispose();
+        // Convert to image
+        const canvas = document.createElement("canvas");
+        canvas.width = result.shape[1];
+        canvas.height = result.shape[0];
         
+        await tf.browser.draw(result as tfjs.Tensor3D, canvas);
+        
+        // Get image URL and validate
+        const imageUrl = canvas.toDataURL('image/png');
+        this.log('Generated image:', {
+          frameIndex: tokenData.frameIndex,
+          width: canvas.width,
+          height: canvas.height,
+          urlLength: imageUrl.length
+        });
+  
+        // Store in frame buffer
+        this.frameBuffer.frames.set(tokenData.frameIndex, {
+          timestamp: Date.now(),
+          data: imageUrl
+        });
+  
+        // Emit frame ready event
+        this.emit("frameReady", {
+          frameIndex: tokenData.frameIndex,
+          imageUrl
+        });
+  
+        // Cleanup
+        result.dispose();
+  
       } catch (error) {
-        this.log('Error in batch processing', { error });
-        throw error;
+        console.error('Error processing token:', error);
+        this.log('Error details:', {
+          frameIndex: tokenData.frameIndex,
+          modelState: this.model ? 'loaded' : 'not loaded',
+          referenceData: this.referenceData.has(this.currentVideoId!)
+        });
+        
+        this.metrics.droppedFrames++;
+        this.emit("error", {
+          message: `Failed to process frame ${tokenData.frameIndex}: ${error.message}`,
+          error
+        });
       }
+  
+      // Allow UI updates between frames
+      await new Promise(resolve => setTimeout(resolve, 0));
     }
     
     await this.logMemoryUsage('End of batch processing');
+  }
+  
+  // Add helper method to validate reference features
+  private validateReferenceFeatures(features: ReferenceFeature[]): boolean {
+    if (!features || features.length !== 4) {
+      this.log('Invalid reference features:', {
+        count: features?.length || 0,
+        expected: 4
+      });
+      return false;
+    }
+  
+    for (let i = 0; i < features.length; i++) {
+      const feature = features[i];
+      if (!feature.tensor || feature.tensor.isDisposed) {
+        this.log(`Invalid reference feature at index ${i}:`, {
+          hasFeature: !!feature,
+          hasTensor: !!feature?.tensor,
+          isDisposed: feature?.tensor?.isDisposed
+        });
+        return false;
+      }
+    }
+  
+    return true;
   }
 
   // Update processTokenBatch for better error handling
