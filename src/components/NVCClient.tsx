@@ -175,7 +175,8 @@ useEffect(() => {
       codecRef.current = new RTCNeuralCodec({
         serverUrl: 'wss://192.168.1.108:8000/rtc',
         fps: 24,
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+        modelPath: '/graph_model_client/model.json'
       });
 
       // Set up event listeners with phase tracking
@@ -385,32 +386,7 @@ useEffect(() => {
         setCurrentFrameImage(currentImg);
         setReferenceFrameImage(referenceImg);
 
-        if (wsRef.current) {
-          console.log(`WebSocket state: ${wsRef.current.readyState}`);
-          console.log(
-            `WebSocket states: CONNECTING(${WebSocket.CONNECTING}), OPEN(${WebSocket.OPEN}), CLOSING(${WebSocket.CLOSING}), CLOSED(${WebSocket.CLOSED})`
-          );
-        } else {
-          console.log("❌ WebSocket ref is null");
-        }
-
-        if (wsRef.current?.readyState === WebSocket.OPEN) {
-          const message = {
-            type: "process_frames",
-            video_id: selectedVideo,
-            current_frame: currentFrame,
-            reference_frame: referenceFrame,
-          };
-          console.log("📤 Sending WebSocket message:", message);
-
-          wsRef.current.send(JSON.stringify(message));
-          console.log("✅ Message sent successfully");
-        } else {
-          const error = "WebSocket is not connected";
-          console.error("❌ WebSocket Error:", error);
-          console.log(`WebSocket readyState: ${wsRef.current?.readyState}`);
-          setError(error);
-        }
+       
       } else {
         console.error("❌ Failed to fetch one or both frames");
         console.log("Current frame image:", !!currentImg);

@@ -54,6 +54,7 @@ interface RTCConfig {
   serverUrl: string; // Signaling server URL
   iceServers: RTCIceServer[];
   fps: number;
+  modelPath?: string;
 }
 
 interface SplitReferenceFeatures {
@@ -185,7 +186,7 @@ private calculateTensorSize(tensor: tfjs.Tensor): number {
 }
 
 // Debug logger
-private log(message: string, data?: any) {
+public log(message: string, data?: any) {
   if (this.DEBUG) {
     console.log(`[RTCNeuralCodec] ${message}`, data);
   }
@@ -730,7 +731,13 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   private readonly MAX_TENSOR_SIZE = 1024 * 1024 * 1024; // 1GB per tensor
   private readonly SPLIT_SIZE = 32; // Split tensors into chunks of this size
 
-
+  //audio sync
+  private readonly SYNC_INTERVAL = 100; // Check sync every 100ms
+  private readonly MAX_SYNC_DRIFT = 0.1; // Maximum allowed drift in seconds
+  private syncInterval: NodeJS.Timer | null = null;
+  private targetFps: number = 24;
+  private lastFrameTime: number = 0;
+  private modelPath: string | null = null;
 
 
   constructor(config: RTCConfig) {
@@ -738,11 +745,20 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     this.audioElement = new Audio();
     this.audioElement.autoplay = true;
     this.setupAudioElement();
-    if (config.modelPath) {
-      this.modelLoadPromise = this.initModel(config.modelPath).then(() => {
-        this.modelInitialized = true;
-      });
-    }
+
+     // Store model path from config
+     this.modelPath = config.modelPath || null;
+
+     // Initialize model if path provided
+     if (this.modelPath) {
+       this.modelLoadPromise = this.initModel(this.modelPath).then(() => {
+         this.modelInitialized = true;
+         console.log("Model initialized successfully");
+       }).catch(error => {
+         console.error("Failed to initialize model:", error);
+         throw error;
+       });
+     }
   }
 
   // Add method to check model state
@@ -753,20 +769,26 @@ class RTCNeuralCodec extends BaseNeuralCodec {
 
     if (this.modelLoadPromise) {
       await this.modelLoadPromise;
+    } else if (this.modelPath) {
+      this.modelLoadPromise = this.initModel(this.modelPath).then(() => {
+        this.modelInitialized = true;
+      });
+      await this.modelLoadPromise;
     } else if (this.config.modelPath) {
-      this.modelLoadPromise = this.initModel(this.config.modelPath).then(() => {
+      // Fallback to config path if available
+      this.modelPath = this.config.modelPath;
+      this.modelLoadPromise = this.initModel(this.modelPath).then(() => {
         this.modelInitialized = true;
       });
       await this.modelLoadPromise;
     } else {
-      throw new Error("No model path provided");
+      throw new Error("Model path not provided. Please provide modelPath in configuration.");
     }
 
     if (!this.model) {
       throw new Error("Model failed to initialize");
     }
   }
-
   private getRetryDelay(): number {
     // Exponential backoff with jitter
     const exponentialDelay = Math.min(
@@ -960,68 +982,156 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  // Modify startPlayback to handle resume from pause
-  public async startPlayback(videoId: number): Promise<void> {
-    try {
-      // If resuming the same video
-      if (
-        this.currentVideoId === videoId &&
-        this.playbackState === PlaybackState.PAUSED
-      ) {
-        this.playbackState = PlaybackState.PLAYING;
 
-        // Resume from last position
-        if (this.pausedAt !== null) {
-          this.audioElement.currentTime = this.pausedAt;
-        }
-
-        this.audioElement.play();
-
-        // Notify peer about resume
-        if (this.dataChannel?.readyState === "open") {
-          this.dataChannel.send(
-            JSON.stringify({
-              type: "playback_control",
-              action: "resume",
-              timestamp: this.pausedAt,
-              frameIndex: this.lastFrameIndex,
-            })
-          );
-        }
-
-        // Reset pause state
-        this.pausedAt = null;
-        this.lastFrameIndex = null;
-
-        return;
+  
+  // Add sync method
+  private async syncPlayback(): Promise<void> {
+    if (this.playbackState !== PlaybackState.PLAYING) return;
+  
+    const currentTime = this.audioElement.currentTime;
+    const targetFrame = Math.floor(currentTime * this.targetFps);
+    const currentFrame = this.lastFrameIndex || 0;
+    
+    // Calculate drift
+    const frameDrift = targetFrame - currentFrame;
+    const timeDrift = frameDrift / this.targetFps;
+  
+    this.log('Sync check:', {
+      audioTime: currentTime,
+      targetFrame,
+      currentFrame,
+      drift: timeDrift
+    });
+  
+    // If drift exceeds threshold, adjust
+    if (Math.abs(timeDrift) > this.MAX_SYNC_DRIFT) {
+      this.log('Adjusting for drift:', {
+        drift: timeDrift,
+        action: timeDrift > 0 ? 'speed up' : 'slow down'
+      });
+  
+      // Jump to correct frame if drift is too large
+      if (Math.abs(frameDrift) > 5) {
+        await this.seekToFrame(targetFrame);
+      } else {
+        // Adjust processing rate
+        const adjustment = timeDrift > 0 ? 0.9 : 1.1;
+        this.targetFps = this.config.fps * adjustment;
       }
-
-      // Otherwise start new playback
-      this.currentVideoId = videoId;
-      this.playbackState = PlaybackState.PLAYING;
-      this.pausedAt = null;
-      this.lastFrameIndex = null;
-
-      // Rest of existing startPlayback implementation...
-      await this.loadReferenceData(videoId);
-      const prefetchSize = 100;
-      await this.fetchBulkTokens(videoId, 0, prefetchSize - 1);
-      this.startBackgroundTokenFetching(videoId, prefetchSize);
-
-      if (this.dataChannel?.readyState === "open") {
-        this.dataChannel.send(
-          JSON.stringify({
-            type: "start_stream",
-            videoId,
-            fps: this.config.fps,
-          })
+    } else {
+      // Reset to normal speed
+      this.targetFps = this.config.fps;
+    }
+  }
+  
+  // Add seek method
+  private async seekToFrame(frameIndex: number): Promise<void> {
+    this.log('Seeking to frame:', frameIndex);
+    
+    try {
+      // Clear processing queue
+      this.processingQueue.clear();
+      
+      // Get frame from buffer or fetch if needed
+      let frame = this.frameBuffer.frames.get(frameIndex);
+      if (!frame && this.currentVideoId) {
+        await this.fetchBulkTokens(
+          this.currentVideoId,
+          frameIndex,
+          frameIndex + this.frameBuffer.capacity
         );
+        frame = this.frameBuffer.frames.get(frameIndex);
+      }
+  
+      if (frame) {
+        this.lastFrameIndex = frameIndex;
+        this.emit('frameReady', {
+          frameIndex,
+          imageUrl: frame.data
+        });
       }
     } catch (error) {
-      console.error("Playback start failed:", error);
-      this.emit("error", { message: "Failed to start playback", error });
+      console.error('Seek error:', error);
+      this.emit('error', { message: 'Failed to seek', error });
+    }
+  }
+  
+  // Modify startPlayback
+  
+  
+  // Add sync tracking
+  private startSyncTracking(): void {
+    if (this.syncInterval) {
+      clearInterval(this.syncInterval);
+    }
+    
+    this.syncInterval = setInterval(() => {
+      this.syncPlayback().catch(error => {
+        console.error('Sync error:', error);
+      });
+    }, this.SYNC_INTERVAL);
+  }
+  
+  // Modify pause
+  public async pause(): Promise<void> {
+    try {
+      if (this.playbackState !== PlaybackState.PLAYING) return;
+  
+      this.playbackState = PlaybackState.PAUSED;
+      this.pausedAt = this.audioElement.currentTime;
+      this.lastFrameIndex = Math.floor(this.pausedAt * this.config.fps);
+  
+      // Stop sync tracking
+      if (this.syncInterval) {
+        clearInterval(this.syncInterval);
+        this.syncInterval = null;
+      }
+  
+      this.audioElement.pause();
+      
+      if (this.dataChannel?.readyState === 'open') {
+        this.dataChannel.send(JSON.stringify({
+          type: 'playback_control',
+          action: 'pause',
+          timestamp: this.pausedAt,
+          frameIndex: this.lastFrameIndex
+        }));
+      }
+  
+      this.emit('metricsUpdate', {
+        ...this.metrics,
+        fps: 0
+      });
+  
+    } catch (error) {
+      console.error('Error pausing playback:', error);
+      this.emit('error', { message: 'Failed to pause playback', error });
       throw error;
     }
+  }
+  
+  // Modify stop
+  public stop(): void {
+    this.playbackState = PlaybackState.STOPPED;
+    
+    if (this.syncInterval) {
+      clearInterval(this.syncInterval);
+      this.syncInterval = null;
+    }
+    
+    this.pausedAt = null;
+    this.lastFrameIndex = null;
+    this.lastFrameTime = 0;
+    
+    this.audioElement.pause();
+    this.audioElement.currentTime = 0;
+    
+    this.currentVideoId = null;
+    this.processingQueue.clear();
+    this.frameBuffer.frames.clear();
+    
+    this.dataChannel?.close();
+    this.peerConnection?.close();
   }
 
   // Modify stop method to handle state
@@ -1070,13 +1180,6 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-  public stop(): void {
-    this.audioElement.pause();
-    this.currentVideoId = null;
-    this.processingQueue.clear();
-    this.dataChannel?.close();
-    this.peerConnection?.close();
-  }
 
   private handleDisconnect(): void {
     console.log("Connection lost, attempting reconnect...");
@@ -1330,65 +1433,52 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     }
   }
 
-
- 
   
   private async processBatchTokens(tokens: FrameToken[]): Promise<void> {
     const tf = await import("@tensorflow/tfjs");
     await this.logMemoryUsage('Start of batch processing');
     
+    // Ensure model and reference data are ready
+    await this.ensureModel();
+    
+    // Debug check current state
+    this.log('Processing batch state:', {
+      currentVideoId: this.currentVideoId,
+      playbackState: this.playbackState,
+      numTokens: tokens.length
+    });
+  
+    if (!this.currentVideoId) {
+      throw new Error("No video selected. Current video ID is null.");
+    }
+    
+    const refData = this.referenceData.get(this.currentVideoId);
+    if (!refData) {
+      throw new Error(`Reference data not loaded for video ${this.currentVideoId}`);
+    }
+    
+    // Validate reference features before processing
+    if (!this.validateReferenceFeatures(refData.features)) {
+      throw new Error(`Invalid reference features for video ${this.currentVideoId}`);
+    }
+    
     for (const tokenData of tokens) {
       try {
-        // Log token details
-        this.log('Processing token:', {
-          frameIndex: tokenData.frameIndex,
-          tokenLength: tokenData.token.length
-        });
-  
-        if (!this.model || !this.currentVideoId) {
-          throw new Error("Model or video not initialized");
-        }
-  
-        const refData = this.referenceData.get(this.currentVideoId);
-        if (!refData || !refData.features) {
-          throw new Error("Reference data not loaded");
-        }
-  
-        // Debug reference features
-        this.log('Reference features:', {
-          numFeatures: refData.features.length,
-          features: refData.features.map((f, i) => ({
-            index: i,
-            tensor: f.tensor ? 'valid' : 'invalid',
-            shape: f.tensor?.shape || 'unknown'
-          }))
-        });
-  
         // Process token with tensor tracking
         const result = await tf.tidy(() => {
           // Create input token
           const currentToken = tf.tensor2d([Array.from(tokenData.token)], [1, 32])
             .asType("float32");
   
-          // Create input dictionary using feature tensors
+          // Create input dictionary
           const inputDict = {
             "args_0:0": currentToken,
             "args_0_1:0": currentToken,
-            "args_0_2": refData.features[0].tensor,
-            "args_0_3": refData.features[1].tensor,
-            "args_0_4": refData.features[2].tensor,
-            "args_0_5": refData.features[3].tensor
+            "args_0_2:0": refData.features[0].tensor,
+            "args_0_3:0": refData.features[1].tensor,
+            "args_0_4:0": refData.features[2].tensor,
+            "args_0_5:0": refData.features[3].tensor
           };
-  
-          // Log input shapes for debugging
-          this.log('Model inputs:', {
-            tokenShape: currentToken.shape,
-            features: Object.entries(inputDict).map(([key, tensor]) => ({
-              key,
-              shape: tensor.shape,
-              dtype: tensor.dtype
-            }))
-          });
   
           // Execute model
           let output = this.model!.execute(inputDict) as tfjs.Tensor;
@@ -1398,7 +1488,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
             output = tf.transpose(output, [0, 2, 3, 1]);
           }
           output = output.squeeze([0]);
-          return tf.clipByValue(output, 0, 1);
+          return tf.keep(tf.clipByValue(output, 0, 1));
         });
   
         // Convert to image
@@ -1407,15 +1497,7 @@ class RTCNeuralCodec extends BaseNeuralCodec {
         canvas.height = result.shape[0];
         
         await tf.browser.draw(result as tfjs.Tensor3D, canvas);
-        
-        // Get image URL and validate
         const imageUrl = canvas.toDataURL('image/png');
-        this.log('Generated image:', {
-          frameIndex: tokenData.frameIndex,
-          width: canvas.width,
-          height: canvas.height,
-          urlLength: imageUrl.length
-        });
   
         // Store in frame buffer
         this.frameBuffer.frames.set(tokenData.frameIndex, {
@@ -1434,17 +1516,8 @@ class RTCNeuralCodec extends BaseNeuralCodec {
   
       } catch (error) {
         console.error('Error processing token:', error);
-        this.log('Error details:', {
-          frameIndex: tokenData.frameIndex,
-          modelState: this.model ? 'loaded' : 'not loaded',
-          referenceData: this.referenceData.has(this.currentVideoId!)
-        });
-        
         this.metrics.droppedFrames++;
-        this.emit("error", {
-          message: `Failed to process frame ${tokenData.frameIndex}: ${error.message}`,
-          error
-        });
+        throw error;
       }
   
       // Allow UI updates between frames
@@ -1454,32 +1527,110 @@ class RTCNeuralCodec extends BaseNeuralCodec {
     await this.logMemoryUsage('End of batch processing');
   }
   
-  // Add helper method to validate reference features
-  private validateReferenceFeatures(features: ReferenceFeature[]): boolean {
-    if (!features || features.length !== 4) {
-      this.log('Invalid reference features:', {
-        count: features?.length || 0,
-        expected: 4
-      });
-      return false;
+    // Modify startPlayback to ensure proper initialization
+    public async startPlayback(videoId: number): Promise<void> {
+      try {
+        // Ensure model is loaded first
+        await this.ensureModel();
+    
+        // If resuming same video from pause
+        if (this.currentVideoId === videoId && this.playbackState === PlaybackState.PAUSED) {
+          this.playbackState = PlaybackState.PLAYING;
+          if (this.pausedAt !== null) {
+            this.audioElement.currentTime = this.pausedAt;
+          }
+          this.audioElement.play();
+          this.startSyncTracking();
+          return;
+        }
+        this.log("videoID:",videoId)
+        // Set video ID and state BEFORE loading data
+        this.currentVideoId = videoId;
+        this.playbackState = PlaybackState.PLAYING;
+        this.lastFrameIndex = 0;
+        this.targetFps = this.config.fps;
+        this.lastFrameTime = performance.now();
+    
+        this.log('Starting playback setup:', {
+          videoId,
+          fps: this.config.fps,
+          modelLoaded: !!this.model,
+        });
+    
+        // Load reference data
+        await this.loadReferenceData(videoId);
+    
+        // Validate reference data
+        const refData = this.referenceData.get(videoId);
+        if (!refData || !this.validateReferenceFeatures(refData.features)) {
+          throw new Error("Failed to load or validate reference data");
+        }
+    
+        // Prefetch initial frames
+        const prefetchSize = Math.ceil(this.frameBuffer.capacity * 1.5);
+        
+        this.log('Prefetching frames:', {
+          videoId,
+          startFrame: 0,
+          prefetchSize,
+          currentVideoId: this.currentVideoId // Debug check
+        });
+    
+        await this.fetchBulkTokens(videoId, 0, prefetchSize - 1);
+    
+        // Start background processes
+        this.startSyncTracking();
+        this.startBackgroundTokenFetching(videoId, prefetchSize);
+    
+        // Start audio
+        this.audioElement.currentTime = 0;
+        await this.audioElement.play();
+    
+        this.log('Playback started successfully:', {
+          videoId,
+          state: this.playbackState,
+          currentVideoId: this.currentVideoId
+        });
+    
+      } catch (error) {
+        // Reset state on error
+        this.playbackState = PlaybackState.STOPPED;
+        this.currentVideoId = null;
+        this.lastFrameIndex = null;
+        this.log('Playback start failed:', {
+          error,
+          videoId,
+          state: this.playbackState
+        });
+        console.error('Playback start failed:', error);
+        this.emit('error', { message: 'Failed to start playback', error });
+        throw error;
+      }
     }
-  
-    for (let i = 0; i < features.length; i++) {
-      const feature = features[i];
-      if (!feature.tensor || feature.tensor.isDisposed) {
-        this.log(`Invalid reference feature at index ${i}:`, {
-          hasFeature: !!feature,
-          hasTensor: !!feature?.tensor,
-          isDisposed: feature?.tensor?.isDisposed
+    // Helper method to validate reference features
+    private validateReferenceFeatures(features: ReferenceFeature[]): boolean {
+      if (!features || features.length !== 4) {
+        this.log('Invalid reference features:', {
+          count: features?.length || 0,
+          expected: 4
         });
         return false;
       }
+  
+      for (let i = 0; i < features.length; i++) {
+        if (!features[i] || !features[i].tensor || features[i].tensor.isDisposed) {
+          this.log(`Invalid reference feature ${i}:`, {
+            hasFeature: !!features[i],
+            hasTensor: !!features[i]?.tensor,
+            isDisposed: features[i]?.tensor?.isDisposed
+          });
+          return false;
+        }
+      }
+  
+      return true;
     }
   
-    return true;
-  }
-
-  // Update processTokenBatch for better error handling
   private async processTokenBatch(videoTokens: Map<number, number[]>) {
     const batchTokens: FrameToken[] = [];
 
