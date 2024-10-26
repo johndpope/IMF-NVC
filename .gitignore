@@ -1,6 +1,8 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
+/imf-decoder/target
+/imf-decoder/node_modules
 *.onnx
 /node_modules
 /.pnp
