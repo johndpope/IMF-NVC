@@ -1,4 +1,3 @@
-// webpack.config.js
 const path = require('path');
 const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
 const CopyWebpackPlugin = require("copy-webpack-plugin");
@@ -20,6 +19,10 @@ module.exports = {
             '@': path.resolve(__dirname, 'js'),
             '@pkg': path.resolve(__dirname, 'pkg'),
             '@types': path.resolve(__dirname, 'js/types')
+        },
+        fallback: {
+            "path": false,
+            "fs": false
         }
     },
     module: {
@@ -36,13 +39,12 @@ module.exports = {
                 exclude: /node_modules/
             },
             {
+                test: /\.wasm$/,
+                type: "webassembly/async"
+            },
+            {
                 test: /\.js$/,
-                use: {
-                    loader: 'babel-loader',
-                    options: {
-                        presets: ['@babel/preset-env']
-                    }
-                },
+                type: "javascript/auto",
                 exclude: /node_modules/
             },
             {
@@ -60,6 +62,7 @@ module.exports = {
     devServer: {
         static: {
             directory: path.join(__dirname, 'dist'),
+            publicPath: '/'
         },
         compress: true,
         port: 3001,
@@ -73,7 +76,8 @@ module.exports = {
         new WasmPackPlugin({
             crateDirectory: path.resolve(__dirname, "."),
             outDir: 'pkg',
-            extraArgs: '--target web'
+            extraArgs: '--target web',
+            forceMode: 'development'
         }),
         new CopyWebpackPlugin({
             patterns: [
@@ -83,6 +87,10 @@ module.exports = {
                     globOptions: {
                         ignore: ['**/*.html']
                     }
+                },
+                {
+                    from: 'pkg',
+                    to: 'pkg'
                 }
             ]
         })

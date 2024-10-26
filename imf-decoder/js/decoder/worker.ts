@@ -1,4 +1,4 @@
-import init, { DecoderWorker } from '../pkg/imf_decoder';
+import init, { DecoderWorker } from '../../pkg/imf_decoder';
 import { MessageType, DecoderStatus } from '../types';
 
 class DecoderWorkerInstance {
