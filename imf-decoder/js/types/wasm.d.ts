@@ -3,7 +3,9 @@ declare module '*.wasm' {
   export default content;
 }
 
-declare module '../../pkg/imf_decoder' {
+
+
+declare module '@pkg/imf_decoder' {
   export class IMFDecoder {
       constructor(width: number, height: number);
       test(): string;
@@ -13,7 +15,6 @@ declare module '../../pkg/imf_decoder' {
       process_batch(): Promise<string>;
       get_reference_status(): string;
   }
-
   export function start(): void;
   export default function init(): Promise<void>;
 }

@@ -1,39 +1,40 @@
 import { 
-    WasmModule, 
-    IMFDecoder, 
-    ReferenceData, 
-    FrameToken, 
-    VerifyResult,
-    TestResult 
-  } from '../types';
-  
-  async function verifyWasmBuild(): Promise<VerifyResult> {
-    try {
-      // Import the wasm module
-      const wasm_module = await import('../pkg/imf_decoder.js') as WasmModule;
-      
+  WasmModule, 
+  IMFDecoder, 
+  ReferenceData, 
+  FrameToken, 
+  VerifyResult,
+  TestResult 
+} from '../types';
+
+// Changed import path to use webpack alias
+import wasm_module from '@pkg/imf_decoder';
+
+async function verifyWasmBuild(): Promise<VerifyResult> {
+  try {
       // IMPORTANT: Wait for module initialization
-      await wasm_module.default();
+      await wasm_module();
       
       // Log all available exports
       console.log('📦 WASM Exports:', Object.keys(wasm_module));
       
       // Create decoder instance using IMFDecoder
-      const decoder = new wasm_module.IMFDecoder(640, 480);
+      const decoder = new (wasm_module as unknown as WasmModule).IMFDecoder(640, 480);
       
       // Log all available methods on decoder instance
       console.log('🔧 IMFDecoder Methods:', 
-        Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
+          Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
       
       // Test basic functionality
       console.log('🧪 Test method output:', decoder.test());
       
-      return { success: true, module: wasm_module, decoder };
-    } catch (e) {
+      return { success: true, module: wasm_module as unknown as WasmModule, decoder };
+  } catch (e) {
       console.error('❌ WASM verification failed:', e);
       return { success: false, error: e as Error };
-    }
   }
+}
+
   
   async function runDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
     try {
@@ -163,7 +164,8 @@ import {
       
       try {
         // Additional debugging info
-        const wasm_module = await import('../pkg/imf_decoder.js');
+        // const wasm_module = await import('../pkg/imf_decoder.js');
+        await wasm_module();
         console.log('Available exports:', Object.keys(wasm_module));
       } catch (importError) {
         console.error('Failed to import WASM module:', importError);
