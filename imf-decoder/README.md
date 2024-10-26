@@ -66,3 +66,13 @@ cargo clean
 
 # Try building again
 wasm-pack build --target web
+
+
+
+## Memory leak detection 
+```shell
+RUST_BACKTRACE=1 RUST_LOG=debug cargo run --features "leak-detection"
+
+# Enable memory logging
+RUST_LOG=debug npm start
+```
