@@ -8,6 +8,7 @@ cargo clean
 echo "📦 Building WASM with debug info..."
 RUSTFLAGS="-C debuginfo=2" wasm-pack build --target web --dev
 
+
 # Check if wasm-pack build was successful
 if [ $? -ne 0 ]; then
     echo "❌ WASM build failed!"

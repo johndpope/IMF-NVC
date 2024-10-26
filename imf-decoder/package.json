@@ -2,7 +2,7 @@
   "name": "imf-decoder",
   "version": "1.0.0",
   "scripts": {
-    "start": "webpack serve --open --port 3001",
+    "start": "webpack serve --mode development --open --port 3001",
     "build": "webpack --config webpack.config.js",
     "test": "cargo test && wasm-pack test --headless --firefox"
   },

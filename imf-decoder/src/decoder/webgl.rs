@@ -1,3 +1,4 @@
+use wasm_bindgen::prelude::*;
 use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader};
 use wasm_bindgen::JsCast;
 

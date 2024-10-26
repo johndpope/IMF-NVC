@@ -1,2 +1,4 @@
-mod bindings;
-pub use bindings::bind_wasm;
+pub mod bindings;
+
+// Re-export the bindings
+pub use bindings::*;
