@@ -6,20 +6,32 @@ import {
   VerifyResult,
   TestResult 
 } from '../types';
-
-// Changed import path to use webpack alias
-import wasm_module from '@pkg/imf_decoder';
+import { 
+  WasmModule, 
+  IMFDecoder, 
+  ReferenceData, 
+  FrameToken, 
+  VerifyResult,
+  TestResult 
+} from '../types';
 
 async function verifyWasmBuild(): Promise<VerifyResult> {
   try {
-      // IMPORTANT: Wait for module initialization
-      await wasm_module();
+      // Import the wasm module
+      const wasm_module = await import('@pkg/imf_decoder');
+      
+      // Wait for module initialization
+      await wasm_module.default();
       
       // Log all available exports
       console.log('📦 WASM Exports:', Object.keys(wasm_module));
       
       // Create decoder instance using IMFDecoder
-      const decoder = new (wasm_module as unknown as WasmModule).IMFDecoder(640, 480);
+      if (!wasm_module.IMFDecoder) {
+          throw new Error('IMFDecoder not found in WASM module');
+      }
+
+      const decoder = new wasm_module.IMFDecoder(640, 480);
       
       // Log all available methods on decoder instance
       console.log('🔧 IMFDecoder Methods:', 
@@ -28,12 +40,14 @@ async function verifyWasmBuild(): Promise<VerifyResult> {
       // Test basic functionality
       console.log('🧪 Test method output:', decoder.test());
       
-      return { success: true, module: wasm_module as unknown as WasmModule, decoder };
+      return { success: true, module: wasm_module as WasmModule, decoder };
   } catch (e) {
       console.error('❌ WASM verification failed:', e);
       return { success: false, error: e as Error };
   }
 }
+
+
 
   
   async function runDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
