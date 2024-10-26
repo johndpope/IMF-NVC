@@ -1,14 +1,15 @@
-import init, { DecoderWorker } from '../../pkg/imf_decoder';
+// js/decoder/worker.ts
+import init, { IMFDecoder } from '../../pkg/imf_decoder';
 import { MessageType, DecoderStatus } from '../types';
 
 class DecoderWorkerInstance {
-    private decoder: DecoderWorker | null = null;
+    private decoder: IMFDecoder | null = null;
     private status: DecoderStatus = DecoderStatus.Idle;
 
     async initialize() {
         try {
             await init();
-            this.decoder = new DecoderWorker();
+            this.decoder = new IMFDecoder(1920, 1080);
             this.status = DecoderStatus.Ready;
             self.postMessage({ type: MessageType.DecoderCreated });
         } catch (error) {

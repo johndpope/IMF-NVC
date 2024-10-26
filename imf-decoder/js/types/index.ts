@@ -1,3 +1,6 @@
+// js/types/index.ts
+
+// Enums
 export enum PlayerStatus {
   Idle = 0,
   Ready = 1,
@@ -26,6 +29,8 @@ export enum MessageType {
   BatchProcessed = 'BatchProcessed',
   Error = 'Error'
 }
+
+// Configuration Interfaces
 export interface DecoderConfig {
   width: number;
   height: number;
@@ -33,7 +38,7 @@ export interface DecoderConfig {
   batchSize?: number;
 }
 
-
+// Data Structure Interfaces 
 export interface ReferenceFeature {
   tensor: Float32Array;
   shape: number[];
@@ -49,7 +54,7 @@ export interface FrameToken {
   frame_index: number;
 }
 
-
+// WASM Related Interfaces
 export interface WasmModule {
   IMFDecoder: new (width: number, height: number) => IMFDecoder;
   default: () => Promise<void>;
@@ -65,21 +70,7 @@ export interface IMFDecoder {
   get_reference_status: () => string;
 }
 
-export interface ReferenceFeature {
-  tensor: Float32Array;
-  shape: number[];
-}
-
-export interface ReferenceData {
-  features: ReferenceFeature[];
-  token: Float32Array;
-}
-
-export interface FrameToken {
-  token: Float32Array;
-  frame_index: number;
-}
-
+// Result Interfaces
 export interface VerifyResult {
   success: boolean;
   module?: WasmModule;
@@ -90,5 +81,12 @@ export interface VerifyResult {
 export interface TestResult {
   success: boolean;
   message?: string;
+  error?: string;
+}
+
+// Worker Message Interface
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
   error?: string;
 }

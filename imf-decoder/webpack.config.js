@@ -11,18 +11,14 @@ module.exports = {
     output: {
         path: path.resolve(__dirname, 'dist'),
         filename: '[name].js',
-        clean: true
+        clean: true,
+        webassemblyModuleFilename: "[hash].module.wasm"
     },
     resolve: {
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm'],
         alias: {
             '@': path.resolve(__dirname, 'js'),
-            '@pkg': path.resolve(__dirname, 'pkg'),
-            '@types': path.resolve(__dirname, 'js/types')
-        },
-        fallback: {
-            "path": false,
-            "fs": false
+            '@pkg': path.resolve(__dirname, 'pkg')
         }
     },
     module: {
@@ -32,19 +28,9 @@ module.exports = {
                 use: {
                     loader: 'ts-loader',
                     options: {
-                        transpileOnly: true,
-                        configFile: path.resolve(__dirname, 'tsconfig.json'),
+                        transpileOnly: true
                     }
                 },
-                exclude: /node_modules/
-            },
-            {
-                test: /\.wasm$/,
-                type: "webassembly/async"
-            },
-            {
-                test: /\.js$/,
-                type: "javascript/auto",
                 exclude: /node_modules/
             },
             {
@@ -57,17 +43,6 @@ module.exports = {
         asyncWebAssembly: true,
         topLevelAwait: true
     },
-    mode: 'development',
-    devtool: 'source-map',
-    devServer: {
-        static: {
-            directory: path.join(__dirname, 'dist'),
-            publicPath: '/'
-        },
-        compress: true,
-        port: 3001,
-        hot: true
-    },
     plugins: [
         new HtmlWebpackPlugin({
             template: './www/index.html',
@@ -76,8 +51,7 @@ module.exports = {
         new WasmPackPlugin({
             crateDirectory: path.resolve(__dirname, "."),
             outDir: 'pkg',
-            extraArgs: '--target web',
-            forceMode: 'development'
+            extraArgs: '--target web'
         }),
         new CopyWebpackPlugin({
             patterns: [
@@ -87,10 +61,6 @@ module.exports = {
                     globOptions: {
                         ignore: ['**/*.html']
                     }
-                },
-                {
-                    from: 'pkg',
-                    to: 'pkg'
                 }
             ]
         })

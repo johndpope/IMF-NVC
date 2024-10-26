@@ -1,13 +1,12 @@
 {
   "name": "imf-decoder",
   "version": "1.0.0",
-  "scripts": {
-    "clean": "rm -rf dist",
+ "scripts": {
+    "clean": "rm -rf dist pkg",
     "build:wasm": "wasm-pack build --target web",
-    "build:worker": "webpack --config webpack.worker.config.js",
-    "build:main": "webpack --config webpack.config.js",
-    "build": "npm run clean && npm run build:wasm && npm run build:worker && npm run build:main",
-    "start": "npm run build:wasm && webpack serve --config webpack.config.js"
+    "build:ts": "webpack --mode production",
+    "build": "pnpm run clean && pnpm run build:wasm && pnpm run build:ts",
+    "start": "pnpm run build:wasm && webpack serve --mode development"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.4.0"
