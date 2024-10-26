@@ -1,100 +1,131 @@
-async function init() {
+async function verifyWasmBuild() {
   try {
-    // Import the wasm module
-    const wasm_module = await import('../pkg/imf_decoder.js');
-    
-    // Wait for module initialization
-    await wasm_module.default();
-    
-    // Create both decoders
-    const baseDecoder = wasm_module.create_decoder(640, 480);
-    const testDecoder = new wasm_module.WasmDecoder(60, 4); // maxQueueSize: 60, batchSize: 4
-    
-    console.log('Base decoder test:', baseDecoder.test());
-    
-    // Store for later use
-    window.decoder = baseDecoder;
-    window.testDecoder = testDecoder;
-    window.wasm = wasm_module;
-    
-    console.log('Decoders initialized successfully');
-
-    // Run test sequence on test decoder
-    await runDecoderTests(testDecoder);
-
+      // Import the wasm module
+      const wasm_module = await import('../pkg/imf_decoder.js');
+      
+      // IMPORTANT: Wait for module initialization
+      await wasm_module.default();
+      
+      // Log all available exports
+      console.log('📦 WASM Exports:', Object.keys(wasm_module));
+      
+      // Create decoder instance
+      const decoder = new wasm_module.Decoder(640, 480);
+      
+      // Log all available methods on decoder instance
+      console.log('🔧 Decoder Methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
+      
+      // Test basic functionality
+      console.log('🧪 Test method output:', decoder.test());
+      
+      return {success: true, module: wasm_module, decoder: decoder};
   } catch (e) {
-    console.error('Failed to initialize decoder:', e);
-    console.error('Stack:', e.stack);
-    
-    // Additional debugging info
-    console.log('Available exports:', Object.keys(await import('../pkg/imf_decoder.js')));
+      console.error('❌ WASM verification failed:', e);
+      return {success: false, error: e};
   }
 }
 
+async function init() {
+  try {
+      console.log('🔍 Starting WASM verification...');
+      const {success, module: wasm_module, decoder, error} = await verifyWasmBuild();
+      
+      if (!success) {
+          console.error('Failed to initialize decoder:', error);
+          console.error('Stack:', error.stack);
+          return;
+      }
+
+      console.log('✅ WASM verification successful!');
+      
+      // Store for later use
+      window.decoder = decoder;
+      window.wasm = wasm_module;
+      
+      // Run decoder tests if needed
+      await runDecoderTests(decoder);
+      
+      console.log('Decoder initialized successfully');
+  } catch (e) {
+      console.error('Failed to initialize decoder:', e);
+      console.error('Stack:', e.stack);
+      
+      try {
+          // Additional debugging info
+          const wasm_module = await import('../pkg/imf_decoder.js');
+          console.log('Available exports:', Object.keys(wasm_module));
+      } catch (importError) {
+          console.error('Failed to import WASM module:', importError);
+      }
+  }
+}
 async function runDecoderTests(decoder) {
   try {
-    // Enable diagnostic mode
-    decoder.set_diagnostic_mode(true);
+    // Log available methods
+    console.log("Available methods:", 
+      Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
+
+    // Initial test
+    console.log("Initial test:", decoder.test());
     
-    // Create mock reference data
+    // Test diagnostic mode
+    console.log('Setting diagnostic mode...');
+    decoder.diagnostic_mode = true;
+    console.log('Diagnostic mode is now:', decoder.diagnostic_mode);
+
+    // Test reference data
     const referenceData = {
       features: [
         {
           tensor: new Array(128 * 64 * 64).fill(0.5),
           shape: [1, 128, 64, 64]
-        },
-        {
-          tensor: new Array(256 * 32 * 32).fill(0.5),
-          shape: [1, 256, 32, 32]
-        },
-        {
-          tensor: new Array(512 * 16 * 16).fill(0.5),
-          shape: [1, 512, 16, 16]
-        },
-        {
-          tensor: new Array(512 * 8 * 8).fill(0.5),
-          shape: [1, 512, 8, 8]
         }
       ],
       token: new Array(32).fill(0.1)
     };
 
-    // Set reference data
     console.log('Setting reference data...');
-    const refStatus = await decoder.set_reference_data(referenceData);
-    console.log('Reference status:', refStatus);
-    console.log('Current status:', decoder.get_reference_status());
+    try {
+      const status = await decoder.set_reference_data(referenceData);
+      console.log('Set reference data result:', status);
+    } catch (e) {
+      console.error('Error setting reference data:', e);
+    }
 
-    // Create mock bulk tokens
-    const bulkTokens = Array.from({ length: 10 }, (_, i) => ({
-      token: new Array(32).fill(0.2 + (i * 0.01)),
-      frame_index: i,
-      timestamp: Date.now() + (i * 33.33)
-    }));
+    // Test token processing
+    const tokens = [
+      {
+        token: new Array(32).fill(0.5),
+        frame_index: 0
+      }
+    ];
 
-    // Process bulk tokens
-    console.log('Processing bulk tokens...');
-    const result = await decoder.process_tokens(bulkTokens);
-    console.log('Processing result:', result);
+    console.log('Processing tokens...');
+    try {
+      const result = await decoder.process_tokens(tokens);
+      console.log('Process tokens result:', result);
+    } catch (e) {
+      console.error('Error processing tokens:', e);
+    }
 
-    // Process a batch
+    // Test batch processing
     console.log('Processing batch...');
-    const batchResult = await decoder.process_batch();
-    console.log('Batch result:', batchResult);
-
-    // Setup continuous testing
-    startContinuousTest(decoder);
+    try {
+      const batchResult = await decoder.process_batch();
+      console.log('Process batch result:', batchResult);
+    } catch (e) {
+      console.error('Error processing batch:', e);
+    }
 
   } catch (err) {
     console.error('Test sequence failed:', err);
     console.error('Stack:', err.stack);
   }
 }
-
-function startContinuousTest(decoder) {
-  // Setup metrics monitoring
+function startContinuousMonitoring(decoder) {
   setInterval(() => {
     try {
+      // Process new tokens periodically
       const newTokens = Array.from({ length: 4 }, (_, i) => ({
         token: new Array(32).fill(0.3 + (Math.random() * 0.1)),
         frame_index: Date.now(),
@@ -106,16 +137,8 @@ function startContinuousTest(decoder) {
         .catch(err => console.error('Processing error:', err));
 
     } catch (err) {
-      console.error('Metrics update error:', err);
+      console.error('Continuous processing error:', err);
     }
-  }, 1000);
-
-  // Monitor decoder metrics
-  setInterval(() => {
-    const metrics = decoder.getMetrics();
-    console.log('FPS:', metrics.fps);
-    console.log('Memory:', metrics.memoryUsage);
-    console.log('Queue Size:', metrics.queueSize);
   }, 1000);
 }
 
