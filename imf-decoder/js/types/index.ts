@@ -26,6 +26,13 @@ export enum MessageType {
   BatchProcessed = 'BatchProcessed',
   Error = 'Error'
 }
+export interface DecoderConfig {
+  width: number;
+  height: number;
+  maxQueueSize?: number;
+  batchSize?: number;
+}
+
 
 export interface ReferenceFeature {
   tensor: Float32Array;

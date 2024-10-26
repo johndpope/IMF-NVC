@@ -1,0 +1,2616 @@
+// dist/index.js
+/*
+ * ATTENTION: The "eval" devtool has been used (maybe by default in mode: "development").
+ * This devtool is neither made for production nor for readable output files.
+ * It uses "eval()" calls to create a separate source file in the browser devtools.
+ * If you are trying to read the output file, select a different devtool (https://webpack.js.org/configuration/devtool/)
+ * or disable the default devtool with "devtool: false".
+ * If you are looking for production-ready output files, see mode: "production" (https://webpack.js.org/configuration/mode/).
+ */
+/******/ (() => { // webpackBootstrap
+/******/ 	"use strict";
+/******/ 	
+/******/ 	
+/******/ })()
+;
+
+// js/tfjs_bindings.js
+import * as tf from '@tensorflow/tfjs';
+
+// Ensure the model is loaded and available
+export async function loadModel(modelUrl) {
+  window.model = await tf.loadGraphModel(modelUrl);
+}
+
+export async function executeModelAsync(inputData, inputShape) {
+  // Convert inputData (a Float32Array) to a tf.Tensor
+  const inputTensor = tf.tensor(inputData, inputShape);
+
+  // Run inference
+  const outputTensor = await window.model.executeAsync(inputTensor);
+
+  // Get data from the output tensor
+  const outputData = await outputTensor.data();
+
+  // Clean up tensors
+  tf.dispose([inputTensor, outputTensor]);
+
+  // Return output data as a Float32Array
+  return new Float32Array(outputData);
+}
+
+
+// webpack.config.js
+const path = require('path');
+const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
+const CopyWebpackPlugin = require("copy-webpack-plugin");
+
+module.exports = {
+    entry: './js/index.js',
+    output: {
+        path: path.resolve(__dirname, 'dist'),
+        filename: 'index.js',
+    },
+    experiments: {
+        asyncWebAssembly: true
+    },
+    mode: 'development',
+    devServer: {
+        static: {
+            directory: path.join(__dirname, 'dist'),
+        },
+        compress: true,
+        port: 8080,
+    },
+    plugins: [
+        new WasmPackPlugin({
+            crateDirectory: path.resolve(__dirname, "."),
+            outDir: 'pkg',
+            extraArgs: '--target web',
+            forceMode: 'development'
+        }),
+        new CopyWebpackPlugin({
+            patterns: [
+                { from: 'www', to: '.' }
+            ]
+        })
+    ]
+};
+
+// pkg/imf_decoder.js
+let wasm;
+
+const cachedTextDecoder = (typeof TextDecoder !== 'undefined' ? new TextDecoder('utf-8', { ignoreBOM: true, fatal: true }) : { decode: () => { throw Error('TextDecoder not available') } } );
+
+if (typeof TextDecoder !== 'undefined') { cachedTextDecoder.decode(); };
+
+let cachedUint8ArrayMemory0 = null;
+
+function getUint8ArrayMemory0() {
+    if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
+        cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
+    }
+    return cachedUint8ArrayMemory0;
+}
+
+function getStringFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
+}
+
+function _assertBoolean(n) {
+    if (typeof(n) !== 'boolean') {
+        throw new Error(`expected a boolean argument, found ${typeof(n)}`);
+    }
+}
+
+function isLikeNone(x) {
+    return x === undefined || x === null;
+}
+
+function _assertNum(n) {
+    if (typeof(n) !== 'number') throw new Error(`expected a number argument, found ${typeof(n)}`);
+}
+
+let cachedDataViewMemory0 = null;
+
+function getDataViewMemory0() {
+    if (cachedDataViewMemory0 === null || cachedDataViewMemory0.buffer.detached === true || (cachedDataViewMemory0.buffer.detached === undefined && cachedDataViewMemory0.buffer !== wasm.memory.buffer)) {
+        cachedDataViewMemory0 = new DataView(wasm.memory.buffer);
+    }
+    return cachedDataViewMemory0;
+}
+
+let WASM_VECTOR_LEN = 0;
+
+const cachedTextEncoder = (typeof TextEncoder !== 'undefined' ? new TextEncoder('utf-8') : { encode: () => { throw Error('TextEncoder not available') } } );
+
+const encodeString = (typeof cachedTextEncoder.encodeInto === 'function'
+    ? function (arg, view) {
+    return cachedTextEncoder.encodeInto(arg, view);
+}
+    : function (arg, view) {
+    const buf = cachedTextEncoder.encode(arg);
+    view.set(buf);
+    return {
+        read: arg.length,
+        written: buf.length
+    };
+});
+
+function passStringToWasm0(arg, malloc, realloc) {
+
+    if (typeof(arg) !== 'string') throw new Error(`expected a string argument, found ${typeof(arg)}`);
+
+    if (realloc === undefined) {
+        const buf = cachedTextEncoder.encode(arg);
+        const ptr = malloc(buf.length, 1) >>> 0;
+        getUint8ArrayMemory0().subarray(ptr, ptr + buf.length).set(buf);
+        WASM_VECTOR_LEN = buf.length;
+        return ptr;
+    }
+
+    let len = arg.length;
+    let ptr = malloc(len, 1) >>> 0;
+
+    const mem = getUint8ArrayMemory0();
+
+    let offset = 0;
+
+    for (; offset < len; offset++) {
+        const code = arg.charCodeAt(offset);
+        if (code > 0x7F) break;
+        mem[ptr + offset] = code;
+    }
+
+    if (offset !== len) {
+        if (offset !== 0) {
+            arg = arg.slice(offset);
+        }
+        ptr = realloc(ptr, len, len = offset + arg.length * 3, 1) >>> 0;
+        const view = getUint8ArrayMemory0().subarray(ptr + offset, ptr + len);
+        const ret = encodeString(arg, view);
+        if (ret.read !== arg.length) throw new Error('failed to pass whole string');
+        offset += ret.written;
+        ptr = realloc(ptr, len, offset, 1) >>> 0;
+    }
+
+    WASM_VECTOR_LEN = offset;
+    return ptr;
+}
+
+function debugString(val) {
+    // primitive types
+    const type = typeof val;
+    if (type == 'number' || type == 'boolean' || val == null) {
+        return  `${val}`;
+    }
+    if (type == 'string') {
+        return `"${val}"`;
+    }
+    if (type == 'symbol') {
+        const description = val.description;
+        if (description == null) {
+            return 'Symbol';
+        } else {
+            return `Symbol(${description})`;
+        }
+    }
+    if (type == 'function') {
+        const name = val.name;
+        if (typeof name == 'string' && name.length > 0) {
+            return `Function(${name})`;
+        } else {
+            return 'Function';
+        }
+    }
+    // objects
+    if (Array.isArray(val)) {
+        const length = val.length;
+        let debug = '[';
+        if (length > 0) {
+            debug += debugString(val[0]);
+        }
+        for(let i = 1; i < length; i++) {
+            debug += ', ' + debugString(val[i]);
+        }
+        debug += ']';
+        return debug;
+    }
+    // Test for built-in
+    const builtInMatches = /\[object ([^\]]+)\]/.exec(toString.call(val));
+    let className;
+    if (builtInMatches.length > 1) {
+        className = builtInMatches[1];
+    } else {
+        // Failed to match the standard '[object ClassName]'
+        return toString.call(val);
+    }
+    if (className == 'Object') {
+        // we're a user defined class or Object
+        // JSON.stringify avoids problems with cycles, and is generally much
+        // easier than looping through ownProperties of `val`.
+        try {
+            return 'Object(' + JSON.stringify(val) + ')';
+        } catch (_) {
+            return 'Object';
+        }
+    }
+    // errors
+    if (val instanceof Error) {
+        return `${val.name}: ${val.message}\n${val.stack}`;
+    }
+    // TODO we could test for more things here, like `Set`s and `Map`s.
+    return className;
+}
+
+function _assertBigInt(n) {
+    if (typeof(n) !== 'bigint') throw new Error(`expected a bigint argument, found ${typeof(n)}`);
+}
+
+export function start() {
+    wasm.start();
+}
+
+let cachedFloat32ArrayMemory0 = null;
+
+function getFloat32ArrayMemory0() {
+    if (cachedFloat32ArrayMemory0 === null || cachedFloat32ArrayMemory0.byteLength === 0) {
+        cachedFloat32ArrayMemory0 = new Float32Array(wasm.memory.buffer);
+    }
+    return cachedFloat32ArrayMemory0;
+}
+
+function passArrayF32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getFloat32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+let cachedUint32ArrayMemory0 = null;
+
+function getUint32ArrayMemory0() {
+    if (cachedUint32ArrayMemory0 === null || cachedUint32ArrayMemory0.byteLength === 0) {
+        cachedUint32ArrayMemory0 = new Uint32Array(wasm.memory.buffer);
+    }
+    return cachedUint32ArrayMemory0;
+}
+
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function getArrayF32FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getFloat32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
+}
+
+function takeFromExternrefTable0(idx) {
+    const value = wasm.__wbindgen_export_2.get(idx);
+    wasm.__externref_table_dealloc(idx);
+    return value;
+}
+
+function logError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        let error = (function () {
+            try {
+                return e instanceof Error ? `${e.message}\n\nStack:\n${e.stack}` : e.toString();
+            } catch(_) {
+                return "<failed to stringify thrown value>";
+            }
+        }());
+        console.error("wasm-bindgen: imported JS function that was not marked as `catch` threw an error:", error);
+        throw e;
+    }
+}
+
+function addToExternrefTable0(obj) {
+    const idx = wasm.__externref_table_alloc();
+    wasm.__wbindgen_export_2.set(idx, obj);
+    return idx;
+}
+
+function handleError(f, args) {
+    try {
+        return f.apply(this, args);
+    } catch (e) {
+        const idx = addToExternrefTable0(e);
+        wasm.__wbindgen_exn_store(idx);
+    }
+}
+
+function notDefined(what) { return () => { throw new Error(`${what} is not defined`); }; }
+
+const IMFDecoderFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_imfdecoder_free(ptr >>> 0, 1));
+
+export class IMFDecoder {
+
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        IMFDecoderFinalization.unregister(this);
+        return ptr;
+    }
+
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_imfdecoder_free(ptr, 0);
+    }
+    /**
+     * @param {number} width
+     * @param {number} height
+     */
+    constructor(width, height) {
+        _assertNum(width);
+        _assertNum(height);
+        const ret = wasm.imfdecoder_new(width, height);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0] >>> 0;
+        IMFDecoderFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @returns {string}
+     */
+    test() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+            _assertNum(this.__wbg_ptr);
+            const ret = wasm.imfdecoder_test(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * @returns {boolean}
+     */
+    get diagnostic_mode() {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        const ret = wasm.imfdecoder_diagnostic_mode(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * @param {boolean} value
+     */
+    set diagnostic_mode(value) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        _assertBoolean(value);
+        wasm.imfdecoder_set_diagnostic_mode(this.__wbg_ptr, value);
+    }
+    /**
+     * @param {any} data
+     * @returns {string}
+     */
+    set_reference_data(data) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+            _assertNum(this.__wbg_ptr);
+            const ret = wasm.imfdecoder_set_reference_data(this.__wbg_ptr, data);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @param {any} tokens
+     * @returns {string}
+     */
+    process_tokens(tokens) {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+            _assertNum(this.__wbg_ptr);
+            const ret = wasm.imfdecoder_process_tokens(this.__wbg_ptr, tokens);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    process_batch() {
+        let deferred2_0;
+        let deferred2_1;
+        try {
+            if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+            _assertNum(this.__wbg_ptr);
+            const ret = wasm.imfdecoder_process_batch(this.__wbg_ptr);
+            var ptr1 = ret[0];
+            var len1 = ret[1];
+            if (ret[3]) {
+                ptr1 = 0; len1 = 0;
+                throw takeFromExternrefTable0(ret[2]);
+            }
+            deferred2_0 = ptr1;
+            deferred2_1 = len1;
+            return getStringFromWasm0(ptr1, len1);
+        } finally {
+            wasm.__wbindgen_free(deferred2_0, deferred2_1, 1);
+        }
+    }
+    /**
+     * @returns {string}
+     */
+    get_reference_status() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+            _assertNum(this.__wbg_ptr);
+            const ret = wasm.imfdecoder_get_reference_status(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+}
+
+const TensorFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_tensor_free(ptr >>> 0, 1));
+
+export class Tensor {
+
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        TensorFinalization.unregister(this);
+        return ptr;
+    }
+
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_tensor_free(ptr, 0);
+    }
+    /**
+     * @param {Float32Array} data
+     * @param {Uint32Array} shape
+     */
+    constructor(data, shape) {
+        const ptr0 = passArrayF32ToWasm0(data, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passArray32ToWasm0(shape, wasm.__wbindgen_malloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.tensor_new(ptr0, len0, ptr1, len1);
+        this.__wbg_ptr = ret >>> 0;
+        TensorFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * @param {Uint32Array} new_shape
+     */
+    reshape(new_shape) {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        const ptr0 = passArray32ToWasm0(new_shape, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.tensor_reshape(this.__wbg_ptr, ptr0, len0);
+    }
+    /**
+     * @returns {Float32Array}
+     */
+    get_data() {
+        if (this.__wbg_ptr == 0) throw new Error('Attempt to use a moved value');
+        _assertNum(this.__wbg_ptr);
+        const ret = wasm.tensor_get_data(this.__wbg_ptr);
+        var v1 = getArrayF32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+}
+
+async function __wbg_load(module, imports) {
+    if (typeof Response === 'function' && module instanceof Response) {
+        if (typeof WebAssembly.instantiateStreaming === 'function') {
+            try {
+                return await WebAssembly.instantiateStreaming(module, imports);
+
+            } catch (e) {
+                if (module.headers.get('Content-Type') != 'application/wasm') {
+                    console.warn("`WebAssembly.instantiateStreaming` failed because your server does not serve Wasm with `application/wasm` MIME type. Falling back to `WebAssembly.instantiate` which is slower. Original error:\n", e);
+
+                } else {
+                    throw e;
+                }
+            }
+        }
+
+        const bytes = await module.arrayBuffer();
+        return await WebAssembly.instantiate(bytes, imports);
+
+    } else {
+        const instance = await WebAssembly.instantiate(module, imports);
+
+        if (instance instanceof WebAssembly.Instance) {
+            return { instance, module };
+
+        } else {
+            return instance;
+        }
+    }
+}
+
+function __wbg_get_imports() {
+    const imports = {};
+    imports.wbg = {};
+    imports.wbg.__wbindgen_error_new = function(arg0, arg1) {
+        const ret = new Error(getStringFromWasm0(arg0, arg1));
+        return ret;
+    };
+    imports.wbg.__wbindgen_is_undefined = function(arg0) {
+        const ret = arg0 === undefined;
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_in = function(arg0, arg1) {
+        const ret = arg0 in arg1;
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_number_get = function(arg0, arg1) {
+        const obj = arg1;
+        const ret = typeof(obj) === 'number' ? obj : undefined;
+        if (!isLikeNone(ret)) {
+            _assertNum(ret);
+        }
+        getDataViewMemory0().setFloat64(arg0 + 8 * 1, isLikeNone(ret) ? 0 : ret, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+    };
+    imports.wbg.__wbindgen_boolean_get = function(arg0) {
+        const v = arg0;
+        const ret = typeof(v) === 'boolean' ? (v ? 1 : 0) : 2;
+        _assertNum(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_string_new = function(arg0, arg1) {
+        const ret = getStringFromWasm0(arg0, arg1);
+        return ret;
+    };
+    imports.wbg.__wbindgen_is_bigint = function(arg0) {
+        const ret = typeof(arg0) === 'bigint';
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_is_object = function(arg0) {
+        const val = arg0;
+        const ret = typeof(val) === 'object' && val !== null;
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_jsval_eq = function(arg0, arg1) {
+        const ret = arg0 === arg1;
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_bigint_from_u64 = function(arg0) {
+        const ret = BigInt.asUintN(64, arg0);
+        return ret;
+    };
+    imports.wbg.__wbindgen_jsval_loose_eq = function(arg0, arg1) {
+        const ret = arg0 == arg1;
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbindgen_string_get = function(arg0, arg1) {
+        const obj = arg1;
+        const ret = typeof(obj) === 'string' ? obj : undefined;
+        var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
+    imports.wbg.__wbg_String_91fba7ded13ba54c = function() { return logError(function (arg0, arg1) {
+        const ret = String(arg1);
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    }, arguments) };
+    imports.wbg.__wbg_getwithrefkey_15c62c2b8546208d = function() { return logError(function (arg0, arg1) {
+        const ret = arg0[arg1];
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_error_f851667af71bcfc6 = function() { return logError(function (arg0, arg1) {
+        let deferred0_0;
+        let deferred0_1;
+        try {
+            deferred0_0 = arg0;
+            deferred0_1 = arg1;
+            console.error(getStringFromWasm0(arg0, arg1));
+        } finally {
+            wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
+        }
+    }, arguments) };
+    imports.wbg.__wbg_new_abda76e883ba8a5f = function() { return logError(function () {
+        const ret = new Error();
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_stack_658279fe44541cf6 = function() { return logError(function (arg0, arg1) {
+        const ret = arg1.stack;
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    }, arguments) };
+    imports.wbg.__wbg_instanceof_WebGl2RenderingContext_8dbe5170d8fdea28 = function() { return logError(function (arg0) {
+        let result;
+        try {
+            result = arg0 instanceof WebGL2RenderingContext;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_attachShader_299671ccaa78592c = function() { return logError(function (arg0, arg1, arg2) {
+        arg0.attachShader(arg1, arg2);
+    }, arguments) };
+    imports.wbg.__wbg_compileShader_9680f4f1d833586c = function() { return logError(function (arg0, arg1) {
+        arg0.compileShader(arg1);
+    }, arguments) };
+    imports.wbg.__wbg_createProgram_48b8a105fd0cfb35 = function() { return logError(function (arg0) {
+        const ret = arg0.createProgram();
+        return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_createShader_f956a5ec67a77964 = function() { return logError(function (arg0, arg1) {
+        const ret = arg0.createShader(arg1 >>> 0);
+        return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_getProgramInfoLog_16c69289b6a9c98e = function() { return logError(function (arg0, arg1, arg2) {
+        const ret = arg1.getProgramInfoLog(arg2);
+        var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    }, arguments) };
+    imports.wbg.__wbg_getProgramParameter_4c981ddc3b62dda8 = function() { return logError(function (arg0, arg1, arg2) {
+        const ret = arg0.getProgramParameter(arg1, arg2 >>> 0);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_getShaderInfoLog_afb2baaac4baaff5 = function() { return logError(function (arg0, arg1, arg2) {
+        const ret = arg1.getShaderInfoLog(arg2);
+        var ptr1 = isLikeNone(ret) ? 0 : passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    }, arguments) };
+    imports.wbg.__wbg_getShaderParameter_e21fb00f8255b86b = function() { return logError(function (arg0, arg1, arg2) {
+        const ret = arg0.getShaderParameter(arg1, arg2 >>> 0);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_linkProgram_983c5972b815b0de = function() { return logError(function (arg0, arg1) {
+        arg0.linkProgram(arg1);
+    }, arguments) };
+    imports.wbg.__wbg_shaderSource_c36f18b5114855e7 = function() { return logError(function (arg0, arg1, arg2, arg3) {
+        arg0.shaderSource(arg1, getStringFromWasm0(arg2, arg3));
+    }, arguments) };
+    imports.wbg.__wbg_instanceof_Window_6575cd7f1322f82f = function() { return logError(function (arg0) {
+        let result;
+        try {
+            result = arg0 instanceof Window;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_document_d7fa2c739c2b191a = function() { return logError(function (arg0) {
+        const ret = arg0.document;
+        return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_performance_8efa15a3e0d18099 = function() { return logError(function (arg0) {
+        const ret = arg0.performance;
+        return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_createElement_e4523490bd0ae51d = function() { return handleError(function (arg0, arg1, arg2) {
+        const ret = arg0.createElement(getStringFromWasm0(arg1, arg2));
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_log_f740dc2253ea759b = typeof console.log == 'function' ? console.log : notDefined('console.log');
+    imports.wbg.__wbg_instanceof_HtmlCanvasElement_022ad88c76df9031 = function() { return logError(function (arg0) {
+        let result;
+        try {
+            result = arg0 instanceof HTMLCanvasElement;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_getContext_bf8985355a4d22ca = function() { return handleError(function (arg0, arg1, arg2) {
+        const ret = arg0.getContext(getStringFromWasm0(arg1, arg2));
+        return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
+    }, arguments) };
+    imports.wbg.__wbg_now_d3cbc9581625f686 = function() { return logError(function (arg0) {
+        const ret = arg0.now();
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_get_5419cf6b954aa11d = function() { return logError(function (arg0, arg1) {
+        const ret = arg0[arg1 >>> 0];
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_isArray_6f3b47f09adb61b5 = function() { return logError(function (arg0) {
+        const ret = Array.isArray(arg0);
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_length_f217bbbf7e8e4df4 = function() { return logError(function (arg0) {
+        const ret = arg0.length;
+        _assertNum(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_instanceof_ArrayBuffer_74945570b4a62ec7 = function() { return logError(function (arg0) {
+        let result;
+        try {
+            result = arg0 instanceof ArrayBuffer;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_newnoargs_1ede4bf2ebbaaf43 = function() { return logError(function (arg0, arg1) {
+        const ret = new Function(getStringFromWasm0(arg0, arg1));
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_call_a9ef466721e824f2 = function() { return handleError(function (arg0, arg1) {
+        const ret = arg0.call(arg1);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_next_b06e115d1b01e10b = function() { return handleError(function (arg0) {
+        const ret = arg0.next();
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_next_13b477da1eaa3897 = function() { return logError(function (arg0) {
+        const ret = arg0.next;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_done_983b5ffcaec8c583 = function() { return logError(function (arg0) {
+        const ret = arg0.done;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_value_2ab8a198c834c26a = function() { return logError(function (arg0) {
+        const ret = arg0.value;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_isSafeInteger_b9dff570f01a9100 = function() { return logError(function (arg0) {
+        const ret = Number.isSafeInteger(arg0);
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_iterator_695d699a44d6234c = function() { return logError(function () {
+        const ret = Symbol.iterator;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_globalThis_05c129bf37fcf1be = function() { return handleError(function () {
+        const ret = globalThis.globalThis;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_self_bf91bf94d9e04084 = function() { return handleError(function () {
+        const ret = self.self;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_window_52dd9f07d03fd5f8 = function() { return handleError(function () {
+        const ret = window.window;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_global_3eca19bb09e9c484 = function() { return handleError(function () {
+        const ret = global.global;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_instanceof_Uint8Array_df0761410414ef36 = function() { return logError(function (arg0) {
+        let result;
+        try {
+            result = arg0 instanceof Uint8Array;
+        } catch (_) {
+            result = false;
+        }
+        const ret = result;
+        _assertBoolean(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_new_fec2611eb9180f95 = function() { return logError(function (arg0) {
+        const ret = new Uint8Array(arg0);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_length_9254c4bd3b9f23c4 = function() { return logError(function (arg0) {
+        const ret = arg0.length;
+        _assertNum(ret);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_set_ec2fcf81bc573fd9 = function() { return logError(function (arg0, arg1, arg2) {
+        arg0.set(arg1, arg2 >>> 0);
+    }, arguments) };
+    imports.wbg.__wbindgen_is_function = function(arg0) {
+        const ret = typeof(arg0) === 'function';
+        _assertBoolean(ret);
+        return ret;
+    };
+    imports.wbg.__wbg_get_ef828680c64da212 = function() { return handleError(function (arg0, arg1) {
+        const ret = Reflect.get(arg0, arg1);
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbg_buffer_ccaed51a635d8a2d = function() { return logError(function (arg0) {
+        const ret = arg0.buffer;
+        return ret;
+    }, arguments) };
+    imports.wbg.__wbindgen_debug_string = function(arg0, arg1) {
+        const ret = debugString(arg1);
+        const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        getDataViewMemory0().setInt32(arg0 + 4 * 1, len1, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr1, true);
+    };
+    imports.wbg.__wbindgen_bigint_get_as_i64 = function(arg0, arg1) {
+        const v = arg1;
+        const ret = typeof(v) === 'bigint' ? v : undefined;
+        if (!isLikeNone(ret)) {
+            _assertBigInt(ret);
+        }
+        getDataViewMemory0().setBigInt64(arg0 + 8 * 1, isLikeNone(ret) ? BigInt(0) : ret, true);
+        getDataViewMemory0().setInt32(arg0 + 4 * 0, !isLikeNone(ret), true);
+    };
+    imports.wbg.__wbindgen_throw = function(arg0, arg1) {
+        throw new Error(getStringFromWasm0(arg0, arg1));
+    };
+    imports.wbg.__wbindgen_memory = function() {
+        const ret = wasm.memory;
+        return ret;
+    };
+    imports.wbg.__wbindgen_init_externref_table = function() {
+        const table = wasm.__wbindgen_export_2;
+        const offset = table.grow(4);
+        table.set(0, undefined);
+        table.set(offset + 0, undefined);
+        table.set(offset + 1, null);
+        table.set(offset + 2, true);
+        table.set(offset + 3, false);
+        ;
+    };
+
+    return imports;
+}
+
+function __wbg_init_memory(imports, memory) {
+
+}
+
+function __wbg_finalize_init(instance, module) {
+    wasm = instance.exports;
+    __wbg_init.__wbindgen_wasm_module = module;
+    cachedDataViewMemory0 = null;
+    cachedFloat32ArrayMemory0 = null;
+    cachedUint32ArrayMemory0 = null;
+    cachedUint8ArrayMemory0 = null;
+
+
+    wasm.__wbindgen_start();
+    return wasm;
+}
+
+function initSync(module) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (typeof module !== 'undefined') {
+        if (Object.getPrototypeOf(module) === Object.prototype) {
+            ({module} = module)
+        } else {
+            console.warn('using deprecated parameters for `initSync()`; pass a single object instead')
+        }
+    }
+
+    const imports = __wbg_get_imports();
+
+    __wbg_init_memory(imports);
+
+    if (!(module instanceof WebAssembly.Module)) {
+        module = new WebAssembly.Module(module);
+    }
+
+    const instance = new WebAssembly.Instance(module, imports);
+
+    return __wbg_finalize_init(instance, module);
+}
+
+async function __wbg_init(module_or_path) {
+    if (wasm !== undefined) return wasm;
+
+
+    if (typeof module_or_path !== 'undefined') {
+        if (Object.getPrototypeOf(module_or_path) === Object.prototype) {
+            ({module_or_path} = module_or_path)
+        } else {
+            console.warn('using deprecated parameters for the initialization function; pass a single object instead')
+        }
+    }
+
+    if (typeof module_or_path === 'undefined') {
+        module_or_path = new URL('imf_decoder_bg.wasm', import.meta.url);
+    }
+    const imports = __wbg_get_imports();
+
+    if (typeof module_or_path === 'string' || (typeof Request === 'function' && module_or_path instanceof Request) || (typeof URL === 'function' && module_or_path instanceof URL)) {
+        module_or_path = fetch(module_or_path);
+    }
+
+    __wbg_init_memory(imports);
+
+    const { instance, module } = await __wbg_load(await module_or_path, imports);
+
+    return __wbg_finalize_init(instance, module);
+}
+
+export { initSync };
+export default __wbg_init;
+
+
+// pkg/index.js
+
+
+# tests/decoder_tests.rs
+
+
+# benches/decode_bench.rs
+
+
+# src/lib.rs
+use wasm_bindgen::prelude::*;
+
+pub mod decoder;
+pub mod utils;
+pub mod wasm;
+
+// Re-export for JavaScript
+pub use wasm::bindings::*;
+
+// Initialize panic hook
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+}
+
+# src/wasm/mod.rs
+pub mod bindings;
+
+// Re-export the bindings
+pub use bindings::*;
+
+# src/wasm/bindings.rs
+use wasm_bindgen::prelude::*;
+use crate::decoder::{Frame, Queue, WebGLDecoder};
+use serde::{Serialize, Deserialize};
+
+// Create helper for logging
+macro_rules! console_log {
+    ($($t:tt)*) => {
+        web_sys::console::log_1(&format!($($t)*).into())
+    }
+}
+
+
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceFeature {
+    tensor: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceData {
+    features: Vec<ReferenceFeature>,
+    token: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrameToken {
+    token: Vec<f32>,
+    frame_index: usize,
+}
+
+#[wasm_bindgen]
+pub struct IMFDecoder {
+    width: u32,
+    height: u32,
+    queue: Queue,
+    webgl: WebGLDecoder,
+    reference_data: Option<ReferenceData>,
+    diagnostic_mode: bool,
+}
+
+#[wasm_bindgen]
+impl IMFDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
+        console_log!("Creating new IMF decoder with dimensions {}x{}", width, height);
+        console_error_panic_hook::set_once();
+        let webgl = WebGLDecoder::new()?;
+        
+        Ok(Self {
+            width,
+            height,
+            queue: Queue::new(60, 4),
+            webgl,
+            reference_data: None,
+            diagnostic_mode: false,
+        })
+    }
+
+    #[wasm_bindgen]
+    pub fn test(&self) -> String {
+        let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
+        console_log!("{}", msg);
+        msg
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn diagnostic_mode(&self) -> bool {
+        self.diagnostic_mode
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_diagnostic_mode(&mut self, value: bool) {
+        self.diagnostic_mode = value;
+        console_log!("Diagnostic mode set to: {}", value);
+    }
+
+    // Set reference data from TensorFlow.js
+    #[wasm_bindgen]
+    pub fn set_reference_data(&mut self, data: JsValue) -> Result<String, JsValue> {
+        console_log!("Setting reference data...");
+        
+        let ref_data: ReferenceData = serde_wasm_bindgen::from_value(data)?;
+        
+        // Validate tensor shapes match IMF requirements
+        let expected_shapes = vec![
+            vec![1, 128, 64, 64],
+            vec![1, 256, 32, 32],
+            vec![1, 512, 16, 16],
+            vec![1, 512, 8, 8],
+        ];
+
+        for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
+            if feature.shape != *expected {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid tensor shape: {:?}, expected: {:?}", 
+                    feature.shape, expected
+                )));
+            }
+        }
+
+        // Validate token size
+        if ref_data.token.len() != 32 {
+            return Err(JsValue::from_str("Reference token must be length 32"));
+        }
+
+        self.reference_data = Some(ref_data);
+        Ok("Reference data set successfully".to_string())
+    }
+
+
+    #[wasm_bindgen]
+    pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
+        console_log!("Processing tokens...");
+        
+        match serde_wasm_bindgen::from_value::<Vec<FrameToken>>(tokens) {
+            Ok(frame_tokens) => {
+                let token_count = frame_tokens.len();
+                
+                // Use reference in the loop to avoid moving frame_tokens
+                for token in &frame_tokens {
+                    let mut frame = Frame::new(self.width as usize, self.height as usize);
+                    // Clone the token data since we're working with a reference
+                    frame.set_data(token.token.iter().map(|&x| x as u8).collect());
+                    self.queue.push(frame);
+                }
+                
+                Ok(format!("Processed {} tokens successfully", token_count))
+            }
+            Err(err) => Err(JsValue::from_str(&format!("Failed to process tokens: {}", err)))
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn process_batch(&mut self) -> Result<String, JsValue> {
+        console_log!("Processing batch...");
+        let processed = self.queue.process_batch();
+        Ok(format!("Processed batch: {} frames", processed.len()))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_reference_status(&self) -> String {
+        match &self.reference_data {
+            Some(ref_data) => format!(
+                "Reference data loaded: {} features",
+                ref_data.features.len()
+            ),
+            None => "No reference data loaded".to_string(),
+        }
+    }
+
+    
+}
+
+// Helper struct for passing tensor data between Rust and JavaScript
+#[derive(Serialize, Deserialize)]
+struct TensorData {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+// JavaScript bindings for IMF operations
+#[wasm_bindgen]
+extern "C" {
+    // Define JavaScript functions that will be called from Rust
+    #[wasm_bindgen(js_namespace = tf, js_name = tensor)]
+    fn create_tensor(data: &[f32], shape: &[usize]) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = tf, js_name = tidy)]
+    fn tensor_tidy(callback: &Closure<dyn FnMut() -> JsValue>) -> JsValue;
+}
+
+# src/decoder/webgl.rs
+use wasm_bindgen::prelude::*;
+use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader};
+use wasm_bindgen::JsCast;
+
+pub struct WebGLDecoder {
+    context: WebGl2RenderingContext,
+    program: WebGlProgram,
+    vertex_shader: WebGlShader,
+    fragment_shader: WebGlShader,
+}
+
+impl WebGLDecoder {
+    pub fn new() -> Result<Self, JsValue> {
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let canvas = document
+            .create_element("canvas")?
+            .dyn_into::<web_sys::HtmlCanvasElement>()?;
+
+        let context = canvas
+            .get_context("webgl2")?
+            .unwrap()
+            .dyn_into::<WebGl2RenderingContext>()?;
+
+        // Initialize shaders and program
+        let vertex_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::VERTEX_SHADER,
+            r#"#version 300 es
+            in vec4 position;
+            void main() {
+                gl_Position = position;
+            }
+            "#,
+        )?;
+
+        let fragment_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::FRAGMENT_SHADER,
+            r#"#version 300 es
+            precision highp float;
+            out vec4 outColor;
+            void main() {
+                outColor = vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            "#,
+        )?;
+
+        let program = link_program(&context, &vertex_shader, &fragment_shader)?;
+
+        Ok(Self {
+            context,
+            program,
+            vertex_shader,
+            fragment_shader,
+        })
+    }
+}
+
+fn compile_shader(
+    context: &WebGl2RenderingContext,
+    shader_type: u32,
+    source: &str,
+) -> Result<WebGlShader, String> {
+    let shader = context
+        .create_shader(shader_type)
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+    context.shader_source(&shader, source);
+    context.compile_shader(&shader);
+
+    if context
+        .get_shader_parameter(&shader, WebGl2RenderingContext::COMPILE_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(shader)
+    } else {
+        Err(context
+            .get_shader_info_log(&shader)
+            .unwrap_or_else(|| String::from("Unknown error creating shader")))
+    }
+}
+
+fn link_program(
+    context: &WebGl2RenderingContext,
+    vert_shader: &WebGlShader,
+    frag_shader: &WebGlShader,
+) -> Result<WebGlProgram, String> {
+    let program = context
+        .create_program()
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+
+    context.attach_shader(&program, vert_shader);
+    context.attach_shader(&program, frag_shader);
+    context.link_program(&program);
+
+    if context
+        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(program)
+    } else {
+        Err(context
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| String::from("Unknown error creating program")))
+    }
+}
+
+# src/decoder/worker.rs
+use wasm_bindgen::prelude::*;
+use serde::{Serialize, Deserialize};
+use web_sys::WorkerGlobalScope;
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecoderStatus {
+    Idle = 0,
+    Initializing = 1,
+    Inited = 2,
+    Ready = 3,
+    Open = 4,
+    Pause = 5,
+    Closed = 6,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecodeMessage {
+    DecoderCreated = 0,
+    DecoderInit = 1,
+    DecoderInited = 2,
+    WasmLoaded = 3,
+    DecoderReady = 4,
+    DecoderOpenError = 5,
+    DecoderStart = 6,
+    DecoderStarted = 7,
+    DecoderPause = 8,
+    DecoderPaused = 9,
+    DecoderClose = 10,
+    DecoderClosed = 11,
+    DecodeVideoBuffer = 12,
+    DecodedVideoFrame = 13,
+}
+
+#[wasm_bindgen]
+pub struct DecoderWorker {
+    status: DecoderStatus,
+    decoder: IMFDecoder,
+    scope: WorkerGlobalScope,
+}
+
+#[wasm_bindgen]
+impl DecoderWorker {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<DecoderWorker, JsValue> {
+        let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
+        let decoder = IMFDecoder::new(1920, 1080)?;
+        
+        let worker = DecoderWorker {
+            status: DecoderStatus::Idle,
+            decoder,
+            scope,
+        };
+
+        worker.post_message(DecodeMessage::DecoderCreated);
+        Ok(worker)
+    }
+
+    fn post_message(&self, msg: DecodeMessage) {
+        let msg_val = serde_wasm_bindgen::to_value(&msg).unwrap();
+        self.scope.post_message(&msg_val).unwrap();
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        self.status = DecoderStatus::Initializing;
+        self.post_message(DecodeMessage::DecoderInit);
+        
+        // Initialize decoder
+        self.decoder.test();
+        
+        self.status = DecoderStatus::Inited;
+        self.post_message(DecodeMessage::DecoderInited);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Ready {
+            return Err(JsValue::from_str("Decoder not ready"));
+        }
+
+        self.status = DecoderStatus::Open;
+        self.post_message(DecodeMessage::DecoderStarted);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.status = DecoderStatus::Pause;
+        self.post_message(DecodeMessage::DecoderPaused);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn process_frame(&mut self, frame_data: JsValue) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.decoder.process_tokens(frame_data)?;
+        self.decoder.process_batch()?;
+        
+        self.post_message(DecodeMessage::DecodedVideoFrame);
+        Ok(())
+    }
+}
+
+# src/decoder/queue.rs
+use std::collections::VecDeque;
+use super::frame::Frame;
+use crate::utils::metrics::Metrics;
+
+pub struct Queue {
+    input_queue: VecDeque<Frame>,
+    processing_queue: VecDeque<Frame>,
+    output_queue: VecDeque<Frame>,
+    max_size: usize,
+    batch_size: usize,
+    metrics: Metrics,
+}
+
+impl Queue {
+    pub fn new(max_size: usize, batch_size: usize) -> Self {
+        Self {
+            input_queue: VecDeque::with_capacity(max_size),
+            processing_queue: VecDeque::with_capacity(batch_size),
+            output_queue: VecDeque::with_capacity(max_size),
+            max_size,
+            batch_size,
+            metrics: Metrics::new(),
+        }
+    }
+
+    pub fn push(&mut self, frame: Frame) -> bool {
+        if self.input_queue.len() < self.max_size {
+            self.input_queue.push_back(frame);
+            self.metrics.record_queue_size(self.input_queue.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn process_batch(&mut self) -> Vec<Frame> {
+        let start_time = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now();
+
+        let mut batch = Vec::new();
+        while batch.len() < self.batch_size && !self.input_queue.is_empty() {
+            if let Some(frame) = self.input_queue.pop_front() {
+                batch.push(frame);
+            }
+        }
+
+        let processing_time = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now() - start_time;
+        
+        self.metrics.record_processing_time(processing_time);
+        batch
+    }
+}
+
+
+# src/decoder/mod.rs
+pub mod frame;
+pub mod queue;
+pub mod tensor;
+pub mod webgl;
+
+pub use frame::Frame;
+pub use queue::Queue;
+pub use tensor::Tensor;
+pub use webgl::WebGLDecoder;
+
+
+# src/decoder/frame.rs
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Frame {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<u8>,
+    pub timestamp: f64,
+    pub is_keyframe: bool,
+}
+
+impl Frame {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0; width * height * 4],
+            timestamp: 0.0,
+            is_keyframe: false,
+        }
+    }
+
+    pub fn set_data(&mut self, data: Vec<u8>) {
+        assert_eq!(data.len(), self.width * self.height * 4);
+        self.data = data;
+    }
+}
+
+# src/decoder/tensor.rs
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct Tensor {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[wasm_bindgen]
+impl Tensor {
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Self {
+        Self { data, shape }
+    }
+
+    pub fn reshape(&mut self, new_shape: Vec<usize>) {
+        let total_size: usize = new_shape.iter().product();
+        assert_eq!(total_size, self.data.len());
+        self.shape = new_shape;
+    }
+
+    pub fn get_data(&self) -> Vec<f32> {
+        self.data.clone()
+    }
+}
+
+
+# src/utils/memory.rs
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub struct Memory {
+    allocated: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Memory {
+    pub fn new() -> Self {
+        Self {
+            allocated: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn allocate(&self, size: usize) {
+        let new_allocated = self.allocated.fetch_add(size, Ordering::SeqCst) + size;
+        let mut peak = self.peak.load(Ordering::SeqCst);
+        while new_allocated > peak {
+            match self.peak.compare_exchange(
+                peak,
+                new_allocated,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(x) => peak = x,
+            }
+        }
+    }
+
+    pub fn deallocate(&self, size: usize) {
+        self.allocated.fetch_sub(size, Ordering::SeqCst);
+    }
+}
+
+# src/utils/metrics.rs
+pub struct Metrics {
+    frame_times: Vec<f64>,
+    queue_sizes: Vec<usize>,
+    processing_times: Vec<f64>,
+    window_size: usize,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            frame_times: Vec::new(),
+            queue_sizes: Vec::new(),
+            processing_times: Vec::new(),
+            window_size: 60,
+        }
+    }
+
+    pub fn record_frame_time(&mut self, time: f64) {
+        self.frame_times.push(time);
+        if self.frame_times.len() > self.window_size {
+            self.frame_times.remove(0);
+        }
+    }
+
+    pub fn record_queue_size(&mut self, size: usize) {
+        self.queue_sizes.push(size);
+        if self.queue_sizes.len() > self.window_size {
+            self.queue_sizes.remove(0);
+        }
+    }
+
+    pub fn record_processing_time(&mut self, time: f64) {
+        self.processing_times.push(time);
+        if self.processing_times.len() > self.window_size {
+            self.processing_times.remove(0);
+        }
+    }
+}
+
+# src/utils/mod.rs
+pub mod memory;
+pub mod metrics;
+
+pub use memory::Memory;
+pub use metrics::Metrics;
+
+# src/player.rs
+use wasm_bindgen::prelude::*;
+use web_sys::{Worker, MessageEvent};
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum PlayerStatus {
+    Idle = 0,
+    Ready = 1,
+    Playing = 2,
+    Pause = 3,
+    Destroyed = 4,
+}
+
+#[wasm_bindgen]
+pub struct Player {
+    status: PlayerStatus,
+    worker: Option<Worker>,
+    width: u32,
+    height: u32,
+}
+
+#[wasm_bindgen]
+impl Player {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<Player, JsValue> {
+        let worker = Worker::new("./decoder.worker.js")?;
+        
+        let player = Player {
+            status: PlayerStatus::Idle,
+            worker: Some(worker),
+            width,
+            height,
+        };
+
+        Ok(player)
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("initialize");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Ready;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Ready {
+            return Err(JsValue::from_str("Player not ready"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("start");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Playing;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Playing {
+            return Err(JsValue::from_str("Player not playing"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("pause");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Pause;
+        }
+        Ok(())
+    }
+}
+
+// js/types/index.ts
+export enum PlayerStatus {
+  Idle = 0,
+  Ready = 1,
+  Playing = 2,
+  Pause = 3,
+  Destroyed = 4
+}
+
+export enum DecoderStatus {
+  Idle = 0,
+  Initializing = 1,
+  Ready = 2,
+  Open = 3,
+  Pause = 4,
+  Closed = 5
+}
+
+export enum MessageType {
+  DecoderCreated = 'DecoderCreated',
+  DecoderInit = 'DecoderInit',
+  DecoderInited = 'DecoderInited',
+  WasmLoaded = 'WasmLoaded',
+  DecoderReady = 'DecoderReady',
+  ReferenceDataSet = 'ReferenceDataSet',
+  TokensProcessed = 'TokensProcessed',
+  BatchProcessed = 'BatchProcessed',
+  Error = 'Error'
+}
+
+export interface ReferenceFeature {
+  tensor: Float32Array;
+  shape: number[];
+}
+
+export interface ReferenceData {
+  features: ReferenceFeature[];
+  token: Float32Array;
+}
+
+export interface FrameToken {
+  token: Float32Array;
+  frame_index: number;
+}
+
+
+export interface WasmModule {
+  IMFDecoder: new (width: number, height: number) => IMFDecoder;
+  default: () => Promise<void>;
+  [key: string]: any;
+}
+
+export interface IMFDecoder {
+  test: () => string;
+  diagnostic_mode: boolean;
+  set_reference_data: (data: ReferenceData) => Promise<string>;
+  process_tokens: (tokens: FrameToken[]) => Promise<string>;
+  process_batch: () => Promise<string>;
+  get_reference_status: () => string;
+}
+
+export interface ReferenceFeature {
+  tensor: Float32Array;
+  shape: number[];
+}
+
+export interface ReferenceData {
+  features: ReferenceFeature[];
+  token: Float32Array;
+}
+
+export interface FrameToken {
+  token: Float32Array;
+  frame_index: number;
+}
+
+export interface VerifyResult {
+  success: boolean;
+  module?: WasmModule;
+  decoder?: IMFDecoder;
+  error?: Error;
+}
+
+export interface TestResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
+// js/decoder/player.ts
+import * as tf from '@tensorflow/tfjs';
+import { 
+    PlayerStatus, 
+    MessageType, 
+    DecoderConfig,
+    WorkerMessage, 
+    ReferenceData 
+} from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<MessageType, Function>;
+    private config: DecoderConfig;
+
+    constructor(config: DecoderConfig) {
+        this.config = config;
+        this.callbacks = new Map();
+        this.worker = new Worker(new URL('./decoder.worker.ts', import.meta.url));
+        this.setupWorkerListeners();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            if (error) {
+                console.error('Decoder error:', error);
+                return;
+            }
+
+            switch (type) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                // Add other message handlers
+            }
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ 
+                type: MessageType.DecoderInit,
+                data: this.config
+            });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        // Create reference tensors
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+
+        const token = tf.zeros([1, 32]);
+
+        // Convert to the format expected by the decoder
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    async processFrame(inputData: Float32Array, inputShape: number[]): Promise<void> {
+        if (!this.model || this.status !== PlayerStatus.Playing) {
+            return;
+        }
+
+        try {
+            const inputTensor = tf.tensor(inputData, inputShape);
+            const outputTensor = await this.model.executeAsync(inputTensor);
+            const outputData = await (outputTensor as tf.Tensor).data();
+
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.TokensProcessed, resolve);
+                
+                this.worker.postMessage({
+                    type: MessageType.TokensProcessed,
+                    data: [{
+                        token: Array.from(outputData),
+                        frame_index: 0
+                    }]
+                });
+            });
+        } catch (error) {
+            console.error('Error processing frame:', error);
+            throw error;
+        }
+    }
+
+    destroy() {
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+}
+
+// js/decoder/decoder.ts
+import * as tf from '@tensorflow/tfjs';
+import { PlayerStatus, MessageType, ReferenceData } from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<string, Function> = new Map();
+
+    constructor(width: number, height: number) {
+        this.worker = new Worker(new URL('./decoder.worker', import.meta.url));
+        this.setupWorkerListeners();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            switch (type as MessageType) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                case MessageType.Error:
+                    console.error('Decoder error:', error);
+                    break;
+            }
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ type: MessageType.DecoderInit });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve, reject) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+        const token = tf.zeros([1, 32]);
+
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    async processFrame(inputData: Float32Array, inputShape: number[]): Promise<void> {
+        if (!this.model) return;
+
+        try {
+            const inputTensor = tf.tensor(inputData, inputShape);
+            const outputTensor = await this.model.executeAsync(inputTensor);
+            const outputData = await (outputTensor as tf.Tensor).data();
+
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.TokensProcessed, resolve);
+                
+                this.worker.postMessage({
+                    type: MessageType.TokensProcessed,
+                    data: [{
+                        token: Array.from(outputData),
+                        frame_index: 0
+                    }]
+                });
+            });
+        } catch (error) {
+            console.error('Error processing frame:', error);
+        }
+    }
+
+    destroy() {
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+}
+
+
+// js/decoder/worker.ts
+import init, { DecoderWorker } from '../pkg/imf_decoder';
+import { MessageType, DecoderStatus } from '../types';
+
+class DecoderWorkerInstance {
+    private decoder: DecoderWorker | null = null;
+    private status: DecoderStatus = DecoderStatus.Idle;
+
+    async initialize() {
+        try {
+            await init();
+            this.decoder = new DecoderWorker();
+            this.status = DecoderStatus.Ready;
+            self.postMessage({ type: MessageType.DecoderCreated });
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    handleMessage(event: MessageEvent) {
+        const { type, data } = event.data;
+
+        try {
+            switch (type as MessageType) {
+                case MessageType.DecoderInit:
+                    this.initialize();
+                    break;
+                case MessageType.TokensProcessed:
+                    this.processTokens(data);
+                    break;
+            }
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    async processTokens(tokens: any) {
+        if (!this.decoder || this.status !== DecoderStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+
+        const result = await this.decoder.process_tokens(tokens);
+        self.postMessage({ type: MessageType.TokensProcessed, result });
+
+        const batchResult = await this.decoder.process_batch();
+        self.postMessage({ type: MessageType.BatchProcessed, result: batchResult });
+    }
+}
+
+const worker = new DecoderWorkerInstance();
+self.onmessage = (event) => worker.handleMessage(event);
+
+// js/utils/wasm-test.ts
+import { 
+    WasmModule, 
+    IMFDecoder, 
+    ReferenceData, 
+    FrameToken, 
+    VerifyResult,
+    TestResult 
+  } from '../types';
+  
+  async function verifyWasmBuild(): Promise<VerifyResult> {
+    try {
+      // Import the wasm module
+      const wasm_module = await import('../pkg/imf_decoder.js') as WasmModule;
+      
+      // IMPORTANT: Wait for module initialization
+      await wasm_module.default();
+      
+      // Log all available exports
+      console.log('📦 WASM Exports:', Object.keys(wasm_module));
+      
+      // Create decoder instance using IMFDecoder
+      const decoder = new wasm_module.IMFDecoder(640, 480);
+      
+      // Log all available methods on decoder instance
+      console.log('🔧 IMFDecoder Methods:', 
+        Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
+      
+      // Test basic functionality
+      console.log('🧪 Test method output:', decoder.test());
+      
+      return { success: true, module: wasm_module, decoder };
+    } catch (e) {
+      console.error('❌ WASM verification failed:', e);
+      return { success: false, error: e as Error };
+    }
+  }
+  
+  async function runDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+    try {
+      // Log available methods
+      console.log("Available methods:", 
+        Object.getOwnPropertyNames(Object.getPrototypeOf(decoder)));
+  
+      // Initial test
+      console.log("Initial test:", decoder.test());
+      
+      // Test diagnostic mode
+      console.log("Setting diagnostic mode...");
+      decoder.diagnostic_mode = true;
+      console.log("Diagnostic mode is now:", decoder.diagnostic_mode);
+  
+      // Create reference data matching the tensor shapes from RTCNeuralCodec
+      const reference_data: ReferenceData = {
+        features: [
+          {
+            // [1, 128, 64, 64]
+            tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+            shape: [1, 128, 64, 64]
+          },
+          {
+            // [1, 256, 32, 32]
+            tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+            shape: [1, 256, 32, 32]
+          },
+          {
+            // [1, 512, 16, 16]
+            tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+            shape: [1, 512, 16, 16]
+          },
+          {
+            // [1, 512, 8, 8]
+            tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+            shape: [1, 512, 8, 8]
+          }
+        ],
+        token: new Float32Array(32).fill(0.1)  // Match token size of [1, 32]
+      };
+  
+      console.log("Setting reference data...");
+      try {
+        const status = await decoder.set_reference_data(reference_data);
+        console.log("Set reference data result:", status);
+      } catch (e) {
+        console.error("Error setting reference data:", e);
+        console.log("set_reference_data exists:", 
+          typeof decoder.set_reference_data);
+        throw e;
+      }
+  
+      // Test token processing with correct shape [1, 32]
+      console.log("Processing tokens...");
+      const tokens: FrameToken[] = [
+        {
+          token: new Float32Array(32).fill(0.5),  // Match token size [1, 32]
+          frame_index: 0
+        }
+      ];
+  
+      try {
+        const result = await decoder.process_tokens(tokens);
+        console.log("Process tokens result:", result);
+      } catch (e) {
+        console.error("Error processing tokens:", e);
+        console.log("process_tokens exists:", typeof decoder.process_tokens);
+        throw e;
+      }
+  
+      // Test batch processing
+      console.log("Processing batch...");
+      try {
+        const result = await decoder.process_batch();
+        console.log("Process batch result:", result);
+      } catch (e) {
+        console.error("Error processing batch:", e);
+        console.log("process_batch exists:", typeof decoder.process_batch);
+        throw e;
+      }
+  
+      // Check reference status
+      const refStatus = decoder.get_reference_status();
+      console.log("Reference status:", refStatus);
+  
+      return {
+        success: true,
+        message: "Tests completed successfully"
+      };
+  
+    } catch (err) {
+      console.error("Test sequence failed:", err);
+      console.error("Stack:", (err as Error).stack);
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+  
+  async function init(): Promise<void> {
+    try {
+      console.log('🔍 Starting WASM verification...');
+      const { success, module: wasm_module, decoder, error } = await verifyWasmBuild();
+      
+      if (!success || !decoder) {
+        console.error('Failed to initialize decoder:', error);
+        if (error?.stack) console.error('Stack:', error.stack);
+        return;
+      }
+  
+      console.log('IMFDecoder instance:', decoder);
+      console.log('✅ WASM verification successful!');
+      
+      // Store for later use
+      (window as any).decoder = decoder;
+      (window as any).wasm = wasm_module;
+      
+      // Run decoder tests
+      await runDecoderTests(decoder);
+      
+      console.log('IMFDecoder initialized successfully');
+    } catch (e) {
+      console.error('Failed to initialize decoder:', e);
+      if (e instanceof Error) console.error('Stack:', e.stack);
+      
+      try {
+        // Additional debugging info
+        const wasm_module = await import('../pkg/imf_decoder.js');
+        console.log('Available exports:', Object.keys(wasm_module));
+      } catch (importError) {
+        console.error('Failed to import WASM module:', importError);
+      }
+    }
+  }
+  
+  // Initialize when page loads
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+  
+  export { init, verifyWasmBuild, runDecoderTests };
+
+// js/index.ts
+import { IMFPlayer } from './decoder/player';
+import { DecoderConfig } from './types';
+
+
+async function initializeDecoder() {
+    try {
+        console.log('🔍 Starting IMF Decoder initialization...');
+        
+        const config: DecoderConfig = {
+            width: 640,
+            height: 480,
+            maxQueueSize: 60,
+            batchSize: 4
+        };
+
+        const player = new IMFPlayer(config);
+        await player.initialize();
+        
+        // Save player instance for debugging
+        (window as any).player = player;
+        
+        console.log('✅ IMF Decoder initialized successfully');
+        
+        return player;
+    } catch (error) {
+        console.error('❌ Failed to initialize decoder:', error);
+        throw error;
+    }
+}
+
+// Initialize when document is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => {
+        initializeDecoder().catch(console.error);
+    });
+} else {
+    initializeDecoder().catch(console.error);
+}
+
+// Export for external use
+export { initializeDecoder };
+
+// pkg/imf_decoder.d.ts
+/* tslint:disable */
+/* eslint-disable */
+export function start(): void;
+export class IMFDecoder {
+  free(): void;
+  /**
+   * @param {number} width
+   * @param {number} height
+   */
+  constructor(width: number, height: number);
+  /**
+   * @returns {string}
+   */
+  test(): string;
+  /**
+   * @param {any} data
+   * @returns {string}
+   */
+  set_reference_data(data: any): string;
+  /**
+   * @param {any} tokens
+   * @returns {string}
+   */
+  process_tokens(tokens: any): string;
+  /**
+   * @returns {string}
+   */
+  process_batch(): string;
+  /**
+   * @returns {string}
+   */
+  get_reference_status(): string;
+  diagnostic_mode: boolean;
+}
+export class Tensor {
+  free(): void;
+  /**
+   * @param {Float32Array} data
+   * @param {Uint32Array} shape
+   */
+  constructor(data: Float32Array, shape: Uint32Array);
+  /**
+   * @param {Uint32Array} new_shape
+   */
+  reshape(new_shape: Uint32Array): void;
+  /**
+   * @returns {Float32Array}
+   */
+  get_data(): Float32Array;
+}
+
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+
+export interface InitOutput {
+  readonly memory: WebAssembly.Memory;
+  readonly start: () => void;
+  readonly __wbg_tensor_free: (a: number, b: number) => void;
+  readonly tensor_new: (a: number, b: number, c: number, d: number) => number;
+  readonly tensor_reshape: (a: number, b: number, c: number) => void;
+  readonly tensor_get_data: (a: number) => Array;
+  readonly __wbg_imfdecoder_free: (a: number, b: number) => void;
+  readonly imfdecoder_new: (a: number, b: number) => Array;
+  readonly imfdecoder_test: (a: number) => Array;
+  readonly imfdecoder_diagnostic_mode: (a: number) => number;
+  readonly imfdecoder_set_diagnostic_mode: (a: number, b: number) => void;
+  readonly imfdecoder_set_reference_data: (a: number, b: number) => Array;
+  readonly imfdecoder_process_tokens: (a: number, b: number) => Array;
+  readonly imfdecoder_process_batch: (a: number) => Array;
+  readonly imfdecoder_get_reference_status: (a: number) => Array;
+  readonly __wbindgen_malloc: (a: number, b: number) => number;
+  readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+  readonly __wbindgen_export_2: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+  readonly __externref_table_dealloc: (a: number) => void;
+  readonly __externref_table_alloc: () => number;
+  readonly __wbindgen_exn_store: (a: number) => void;
+  readonly __wbindgen_start: () => void;
+}
+
+export type SyncInitInput = BufferSource | WebAssembly.Module;
+/**
+* Instantiates the given `module`, which can either be bytes or
+* a precompiled `WebAssembly.Module`.
+*
+* @param {{ module: SyncInitInput }} module - Passing `SyncInitInput` directly is deprecated.
+*
+* @returns {InitOutput}
+*/
+export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
+
+/**
+* If `module_or_path` is {RequestInfo} or {URL}, makes a request and
+* for everything else, calls `WebAssembly.instantiate` directly.
+*
+* @param {{ module_or_path: InitInput | Promise<InitInput> }} module_or_path - Passing `InitInput` directly is deprecated.
+*
+* @returns {Promise<InitOutput>}
+*/
+export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+
+declare module '*/imf_decoder' {
+  export class IMFDecoder {
+      constructor(width: number, height: number);
+      test(): string;
+      diagnostic_mode: boolean;
+      set_reference_data(data: ReferenceData): Promise<string>;
+      process_tokens(tokens: FrameToken[]): Promise<string>;
+      process_batch(): Promise<string>;
+      get_reference_status(): string;
+      free(): void;
+  }
+
+  export class Tensor {
+      constructor(data: Float32Array, shape: Uint32Array);
+      reshape(newShape: Uint32Array): void;
+      get_data(): Float32Array;
+      free(): void;
+  }
+
+  export function start(): void;
+  export default function init(): Promise<void>;
+}
+
+// pkg/imf_decoder_bg.wasm.d.ts
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export function start(): void;
+export function __wbg_tensor_free(a: number, b: number): void;
+export function tensor_new(a: number, b: number, c: number, d: number): number;
+export function tensor_reshape(a: number, b: number, c: number): void;
+export function tensor_get_data(a: number): Array;
+export function __wbg_imfdecoder_free(a: number, b: number): void;
+export function imfdecoder_new(a: number, b: number): Array;
+export function imfdecoder_test(a: number): Array;
+export function imfdecoder_diagnostic_mode(a: number): number;
+export function imfdecoder_set_diagnostic_mode(a: number, b: number): void;
+export function imfdecoder_set_reference_data(a: number, b: number): Array;
+export function imfdecoder_process_tokens(a: number, b: number): Array;
+export function imfdecoder_process_batch(a: number): Array;
+export function imfdecoder_get_reference_status(a: number): Array;
+export function __wbindgen_malloc(a: number, b: number): number;
+export function __wbindgen_realloc(a: number, b: number, c: number, d: number): number;
+export const __wbindgen_export_2: WebAssembly.Table;
+export function __wbindgen_free(a: number, b: number, c: number): void;
+export function __externref_table_dealloc(a: number): void;
+export function __externref_table_alloc(): number;
+export function __wbindgen_exn_store(a: number): void;
+export function __wbindgen_start(): void;
+
+
+// pkg/index.d.ts
+/* tslint:disable */
+/* eslint-disable */
+export function start(): void;
+export class IMFDecoder {
+  free(): void;
+  /**
+   * @param {number} width
+   * @param {number} height
+   */
+  constructor(width: number, height: number);
+  /**
+   * @returns {string}
+   */
+  test(): string;
+  /**
+   * @param {any} data
+   * @returns {string}
+   */
+  set_reference_data(data: any): string;
+  /**
+   * @param {any} tokens
+   * @returns {string}
+   */
+  process_tokens(tokens: any): string;
+  /**
+   * @returns {string}
+   */
+  process_batch(): string;
+  /**
+   * @returns {string}
+   */
+  get_reference_status(): string;
+  diagnostic_mode: boolean;
+}
+export class Tensor {
+  free(): void;
+  /**
+   * @param {Float32Array} data
+   * @param {Uint32Array} shape
+   */
+  constructor(data: Float32Array, shape: Uint32Array);
+  /**
+   * @param {Uint32Array} new_shape
+   */
+  reshape(new_shape: Uint32Array): void;
+  /**
+   * @returns {Float32Array}
+   */
+  get_data(): Float32Array;
+}
+
+export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
+
+export interface InitOutput {
+  readonly memory: WebAssembly.Memory;
+  readonly start: () => void;
+  readonly __wbg_tensor_free: (a: number, b: number) => void;
+  readonly tensor_new: (a: number, b: number, c: number, d: number) => number;
+  readonly tensor_reshape: (a: number, b: number, c: number) => void;
+  readonly tensor_get_data: (a: number) => Array;
+  readonly __wbg_imfdecoder_free: (a: number, b: number) => void;
+  readonly imfdecoder_new: (a: number, b: number) => Array;
+  readonly imfdecoder_test: (a: number) => Array;
+  readonly imfdecoder_diagnostic_mode: (a: number) => number;
+  readonly imfdecoder_set_diagnostic_mode: (a: number, b: number) => void;
+  readonly imfdecoder_set_reference_data: (a: number, b: number) => Array;
+  readonly imfdecoder_process_tokens: (a: number, b: number) => Array;
+  readonly imfdecoder_process_batch: (a: number) => Array;
+  readonly imfdecoder_get_reference_status: (a: number) => Array;
+  readonly __wbindgen_malloc: (a: number, b: number) => number;
+  readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+  readonly __wbindgen_export_2: WebAssembly.Table;
+  readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+  readonly __externref_table_dealloc: (a: number) => void;
+  readonly __externref_table_alloc: () => number;
+  readonly __wbindgen_exn_store: (a: number) => void;
+  readonly __wbindgen_start: () => void;
+}
+
+export type SyncInitInput = BufferSource | WebAssembly.Module;
+/**
+* Instantiates the given `module`, which can either be bytes or
+* a precompiled `WebAssembly.Module`.
+*
+* @param {{ module: SyncInitInput }} module - Passing `SyncInitInput` directly is deprecated.
+*
+* @returns {InitOutput}
+*/
+export function initSync(module: { module: SyncInitInput } | SyncInitInput): InitOutput;
+
+/**
+* If `module_or_path` is {RequestInfo} or {URL}, makes a request and
+* for everything else, calls `WebAssembly.instantiate` directly.
+*
+* @param {{ module_or_path: InitInput | Promise<InitInput> }} module_or_path - Passing `InitInput` directly is deprecated.
+*
+* @returns {Promise<InitOutput>}
+*/
+export default function __wbg_init (module_or_path?: { module_or_path: InitInput | Promise<InitInput> } | InitInput | Promise<InitInput>): Promise<InitOutput>;
+
+
+// pkg/index_bg.wasm.d.ts
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export function start(): void;
+export function __wbg_tensor_free(a: number, b: number): void;
+export function tensor_new(a: number, b: number, c: number, d: number): number;
+export function tensor_reshape(a: number, b: number, c: number): void;
+export function tensor_get_data(a: number): Array;
+export function __wbg_imfdecoder_free(a: number, b: number): void;
+export function imfdecoder_new(a: number, b: number): Array;
+export function imfdecoder_test(a: number): Array;
+export function imfdecoder_diagnostic_mode(a: number): number;
+export function imfdecoder_set_diagnostic_mode(a: number, b: number): void;
+export function imfdecoder_set_reference_data(a: number, b: number): Array;
+export function imfdecoder_process_tokens(a: number, b: number): Array;
+export function imfdecoder_process_batch(a: number): Array;
+export function imfdecoder_get_reference_status(a: number): Array;
+export function __wbindgen_malloc(a: number, b: number): number;
+export function __wbindgen_realloc(a: number, b: number, c: number, d: number): number;
+export const __wbindgen_export_2: WebAssembly.Table;
+export function __wbindgen_free(a: number, b: number, c: number): void;
+export function __externref_table_dealloc(a: number): void;
+export function __externref_table_alloc(): number;
+export function __wbindgen_exn_store(a: number): void;
+export function __wbindgen_start(): void;
+
+

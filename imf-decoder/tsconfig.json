@@ -1,0 +1,46 @@
+{
+  "compilerOptions": {
+    "target": "es2020",
+    "lib": [
+      "dom",
+      "dom.iterable",
+      "esnext",
+      "webworker"
+    ],
+    "allowJs": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noEmit": false,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "jsx": "preserve",
+    "incremental": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["js/*"],
+      "@pkg/*": ["pkg/*"],
+      "@types/*": ["js/types/*"]
+    },
+    "typeRoots": [
+      "./node_modules/@types",
+      "./js/types"
+    ],
+    "outDir": "dist"
+  },
+  "include": [
+    "js/**/*.ts",
+    "js/**/*.tsx",
+    "pkg/**/*.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src",
+    "target"
+  ]
+}

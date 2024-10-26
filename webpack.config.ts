@@ -5,45 +5,36 @@ const CopyWebpackPlugin = require("copy-webpack-plugin");
 const HtmlWebpackPlugin = require('html-webpack-plugin');
 
 module.exports = {
-    entry: {
-        main: './js/index.ts',
-        worker: './js/decoder/worker.ts'
-    },
+    entry: './js/index.ts',  // Changed to .ts extension
     output: {
         path: path.resolve(__dirname, 'dist'),
-        filename: '[name].js',
+        filename: 'index.js',
         clean: true
     },
     resolve: {
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm'],
         alias: {
             '@': path.resolve(__dirname, 'js'),
-            '@pkg': path.resolve(__dirname, 'pkg'),
-            '@types': path.resolve(__dirname, 'js/types')
+            '@pkg': path.resolve(__dirname, 'pkg')
         }
     },
     module: {
         rules: [
             {
-                test: /\.tsx?$/,
-                use: {
-                    loader: 'ts-loader',
-                    options: {
-                        transpileOnly: true,
-                        configFile: path.resolve(__dirname, 'tsconfig.json'),
+                test: /\.(ts|tsx)$/,
+                use: [
+                    {
+                        loader: 'ts-loader',
+                        options: {
+                            transpileOnly: true,
+                            compilerOptions: {
+                                module: 'esnext',
+                                moduleResolution: 'node'
+                            }
+                        }
                     }
-                },
-                exclude: /node_modules/
-            },
-            {
-                test: /\.js$/,
-                use: {
-                    loader: 'babel-loader',
-                    options: {
-                        presets: ['@babel/preset-env']
-                    }
-                },
-                exclude: /node_modules/
+                ],
+                exclude: /node_modules/,
             },
             {
                 test: /\.css$/,
@@ -63,7 +54,7 @@ module.exports = {
         },
         compress: true,
         port: 3001,
-        hot: true
+        hot: true,
     },
     plugins: [
         new HtmlWebpackPlugin({
@@ -73,13 +64,14 @@ module.exports = {
         new WasmPackPlugin({
             crateDirectory: path.resolve(__dirname, "."),
             outDir: 'pkg',
-            extraArgs: '--target web'
+            extraArgs: '--target web',
+            forceMode: 'development'
         }),
         new CopyWebpackPlugin({
             patterns: [
                 { 
                     from: 'www',
-                    to: '.',
+                    to: '.', 
                     globOptions: {
                         ignore: ['**/*.html']
                     }
