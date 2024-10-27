@@ -6,7 +6,7 @@
     "build:wasm": "wasm-pack build --target web",
     "build:ts": "webpack --mode production",
     "build": "pnpm run clean && pnpm run build:wasm && pnpm run build:ts",
-    "start": "pnpm run build:wasm && webpack serve --mode development"
+    "start": "pnpm run build:wasm && webpack serve --mode development --open"
   },
   "dependencies": {
     "@tensorflow/tfjs": "^4.4.0"

@@ -16,7 +16,7 @@ class TestUI {
     private playerStatus: PlayerStatus = PlayerStatus.Idle;
     private decoderStatus: DecoderStatus = DecoderStatus.Idle;
 
-    private buttons: {
+    private buttons!: {
         verify: HTMLButtonElement;
         init: HTMLButtonElement;
         start: HTMLButtonElement;
@@ -25,7 +25,7 @@ class TestUI {
         clear: HTMLButtonElement;
     };
 
-    private statusElements: {
+    private statusElements!: {
         player: HTMLElement;
         decoder: HTMLElement;
     };
@@ -37,20 +37,58 @@ class TestUI {
     }
 
     private initializeElements() {
+        // Verify all elements exist before assignment
+        const verifyBtn = document.getElementById('verifyWasm');
+        const initBtn = document.getElementById('initDecoder');
+        const startBtn = document.getElementById('startDecoder');
+        const processBtn = document.getElementById('processFrame');
+        const pauseBtn = document.getElementById('pauseDecoder');
+        const clearBtn = document.getElementById('clearLog');
+        const playerStatus = document.getElementById('player-status');
+        const decoderStatus = document.getElementById('decoder-status');
+
+        if (!verifyBtn || !initBtn || !startBtn || !processBtn || 
+            !pauseBtn || !clearBtn || !playerStatus || !decoderStatus) {
+            throw new Error('Required DOM elements not found');
+        }
+
         this.buttons = {
-            verify: document.getElementById('verifyWasm') as HTMLButtonElement,
-            init: document.getElementById('initDecoder') as HTMLButtonElement,
-            start: document.getElementById('startDecoder') as HTMLButtonElement,
-            process: document.getElementById('processFrame') as HTMLButtonElement,
-            pause: document.getElementById('pauseDecoder') as HTMLButtonElement,
-            clear: document.getElementById('clearLog') as HTMLButtonElement
+            verify: verifyBtn as HTMLButtonElement,
+            init: initBtn as HTMLButtonElement,
+            start: startBtn as HTMLButtonElement,
+            process: processBtn as HTMLButtonElement,
+            pause: pauseBtn as HTMLButtonElement,
+            clear: clearBtn as HTMLButtonElement
         };
 
         this.statusElements = {
-            player: document.getElementById('player-status') as HTMLElement,
-            decoder: document.getElementById('decoder-status') as HTMLElement
+            player: playerStatus,
+            decoder: decoderStatus
         };
     }
+
+    private interceptConsole() {
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+
+        console.log = (...args: any[]) => {
+            this.log('info', ...args);
+            originalLog.apply(console, args);
+        };
+
+        console.error = (...args: any[]) => {
+            this.log('error', ...args);
+            originalError.apply(console, args);
+        };
+
+        console.warn = (...args: any[]) => {
+            this.log('info', ...args);
+            originalWarn.apply(console, args);
+        };
+    }
+
+
 
     private setupEventListeners() {
         this.buttons.verify.onclick = () => this.verifyWasm();
@@ -136,7 +174,7 @@ class TestUI {
             this.buttons.pause.disabled = false;
             
             this.log('success', 'Decoder started');
-        } catch (error) {
+        } catch (error:any) {
             this.log('error', `Start error: ${error.message}`);
             this.updateStatus('decoder', DecoderStatus.Ready);
         }
@@ -146,19 +184,25 @@ class TestUI {
         if (!this.decoder) return;
 
         try {
-            // Create test frame data
-            const frame = new Float32Array(32).fill(0.5);
+            // Create test frame data - full frame size (640x480 RGBA)
+            const frameWidth = 640;
+            const frameHeight = 480;
+            const channelCount = 4; // RGBA
+            const frame = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+            
             const token: FrameToken = {
                 token: frame,
                 frame_index: 0
             };
 
+            this.log('info', `Processing frame with size: ${frameWidth}x${frameHeight}`);
             await this.decoder.process_tokens([token]);
             const batchResult = await this.decoder.process_batch();
             
             this.log('success', `Frame processed: ${batchResult}`);
         } catch (error) {
-            this.log('error', `Process error: ${error.message}`);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Process error: ${errorMessage}`);
         }
     }
 
