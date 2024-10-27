@@ -163,6 +163,157 @@ async function initializeDecoder(): Promise<void> {
 }
 
 
+
+async function testAnimationFrame(decoder: IMFDecoder): Promise<TestResult> {
+    console.log('🎬 Starting animation frame test...');
+    
+    try {
+        // Track frame count and timing
+        let frameCount = 0;
+        let startTime = performance.now();
+        let lastFrameTime = startTime;
+        const testDuration = 3000; // Run test for 3 seconds
+        const targetFPS = 60;
+        const frameTimings: number[] = [];
+
+        // Create test data
+        const referenceData = {
+            features: [
+                {
+                    tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                    shape: [1, 128, 64, 64]
+                },
+                {
+                    tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                    shape: [1, 256, 32, 32]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                    shape: [1, 512, 16, 16]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                    shape: [1, 512, 8, 8]
+                }
+            ],
+            token: new Float32Array(32).fill(0.1)
+        };
+
+        // Set up decoder
+        console.log('Setting reference data...');
+        await decoder.set_reference_data(referenceData);
+        decoder.diagnostic_mode = true;
+
+        // Create a promise that resolves when the animation test is complete
+        const animationTest = new Promise<void>((resolve) => {
+            function animationFrame(timestamp: number) {
+                const currentTime = performance.now();
+                const elapsed = currentTime - startTime;
+                const frameDuration = currentTime - lastFrameTime;
+                
+                // Process frame
+                const frameData = new Float32Array(640 * 480 * 4).fill(0.5);
+                decoder.process_tokens([{
+                    token: Array.from(frameData),
+                    frame_index: frameCount
+                }]);
+                
+                // Track metrics
+                frameCount++;
+                frameTimings.push(frameDuration);
+                lastFrameTime = currentTime;
+
+                // Continue animation if test duration hasn't elapsed
+                if (elapsed < testDuration) {
+                    requestAnimationFrame(animationFrame);
+                } else {
+                    resolve();
+                }
+            }
+
+            // Start animation loop
+            requestAnimationFrame(animationFrame);
+        });
+
+        // Wait for animation test to complete
+        await animationTest;
+
+        // Calculate test results
+        const averageFrameTime = frameTimings.reduce((a, b) => a + b, 0) / frameTimings.length;
+        const measuredFPS = 1000 / averageFrameTime;
+        const minFrameTime = Math.min(...frameTimings);
+        const maxFrameTime = Math.max(...frameTimings);
+        const frameTimeJitter = maxFrameTime - minFrameTime;
+
+        // Log results
+        console.log('🎥 Animation test completed:');
+        console.log(`Frames processed: ${frameCount}`);
+        console.log(`Average frame time: ${averageFrameTime.toFixed(2)}ms`);
+        console.log(`Measured FPS: ${measuredFPS.toFixed(2)}`);
+        console.log(`Frame time range: ${minFrameTime.toFixed(2)}ms - ${maxFrameTime.toFixed(2)}ms`);
+        console.log(`Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`);
+
+        // Verify test results
+        const performanceThreshold = 0.8; // 80% of target performance
+        const targetFrameTime = 1000 / targetFPS;
+        const isPerformant = averageFrameTime <= targetFrameTime / performanceThreshold;
+        const isStable = frameTimeJitter < targetFrameTime;
+
+        if (!isPerformant || !isStable) {
+            throw new Error(
+                `Performance targets not met:\n` +
+                `Average frame time: ${averageFrameTime.toFixed(2)}ms (target: ${targetFrameTime}ms)\n` +
+                `Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`
+            );
+        }
+
+        return {
+            success: true,
+            message: `Animation test completed successfully:\n` +
+                    `Processed ${frameCount} frames at ${measuredFPS.toFixed(1)} FPS\n` +
+                    `Frame time: ${averageFrameTime.toFixed(1)}ms ±${(frameTimeJitter/2).toFixed(1)}ms`
+        };
+
+    } catch (error) {
+        console.error('❌ Animation test failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+// Update the main test function to include animation testing
+async function runEnhancedDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+    try {
+        // Run existing decoder tests first
+        const basicTests = await runDecoderTests(decoder);
+        if (!basicTests.success) {
+            throw new Error(`Basic decoder tests failed: ${basicTests.error}`);
+        }
+
+        // Run animation frame test
+        console.log('Running animation frame test...');
+        const animationTest = await testAnimationFrame(decoder);
+        if (!animationTest.success) {
+            throw new Error(`Animation test failed: ${animationTest.error}`);
+        }
+
+        return {
+            success: true,
+            message: `All tests completed successfully.\n${animationTest.message}`
+        };
+
+    } catch (error) {
+        console.error('Test sequence failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+
 // Initialize when page loads
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', initializeDecoder);
@@ -170,4 +321,4 @@ if (document.readyState === 'loading') {
   initializeDecoder();
 }
 
-export { initializeDecoder, verifyWasmBuild, runDecoderTests };
+export { initializeDecoder, verifyWasmBuild, runDecoderTests, runEnhancedDecoderTests, testAnimationFrame };

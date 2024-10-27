@@ -1,5 +1,5 @@
 use std::collections::VecDeque;
-use web_sys::Performance;
+// use web_sys::Performance;
 use super::frame::Frame;
 
 #[derive(Debug, Default)]
