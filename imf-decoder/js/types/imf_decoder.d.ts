@@ -14,6 +14,22 @@ declare module '@pkg/imf_decoder' {
         frame_index: number;
     }
 
+    export interface DecoderCapabilities {
+        version: string;
+        dimensions: string;
+        features: string[];
+        methods: string[];
+        performance: {
+            maxQueueSize: number;
+            batchSize: number;
+            targetFPS: number;
+        };
+        diagnostics: {
+            frameCounter: number;
+            diagnosticMode: boolean;
+        };
+    }
+
     export interface DecoderStatus {
         initialized: boolean;
         running: boolean;
@@ -25,14 +41,21 @@ declare module '@pkg/imf_decoder' {
             inputQueueSize: number;
             processingQueueSize: number;
             outputQueueSize: number;
+            maxSize: number;
+            batchSize: number;
+            isFull: boolean;
+            isEmpty: boolean;
+            framesProcessed: number;
+            framesDropped: number;
+            processingTime: number;
+            metrics: {
+                averageProcessingTime: number;
+                queueUtilization: number;
+            };
         };
-    }
-
-    export interface DecoderCapabilities {
-        version: string;
-        dimensions: string;
-        features: string[];
-        methods: string[];
+        debug: {
+            diagnosticMode: boolean;
+        };
     }
 
     export class IMFDecoder {
@@ -49,8 +72,10 @@ declare module '@pkg/imf_decoder' {
         process_tokens(tokens: FrameToken[]): Promise<string>;
         process_batch(): Promise<string>;
         get_reference_status(): string;
+        start_playback(videoId: number): Promise<void>;
     }
 
+    // Module initialization functions
     export function initSync(): void;
     export function start(): void;
     export default function init(): Promise<void>;

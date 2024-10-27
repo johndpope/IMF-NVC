@@ -1,13 +1,53 @@
+# types.rs
+// types.rs - Shared type definitions
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReferenceFeature {
+    pub tensor: Vec<f32>,
+    pub shape: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReferenceData {
+    pub features: Vec<ReferenceFeature>,
+    pub token: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct FrameToken {
+    pub token: Vec<f32>,
+    pub frame_index: usize,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct BulkTokenResponse {
+    pub tokens: std::collections::HashMap<usize, Vec<f32>>,
+    pub metadata: TokenMetadata,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct TokenMetadata {
+    pub total_frames: usize,
+    pub processed_frames: usize,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TensorData {
+    pub data: Vec<f32>,
+    pub shape: Vec<usize>,
+}
+
 # lib.rs
 use wasm_bindgen::prelude::*;
 
 pub mod decoder;
 pub mod utils;
 pub mod wasm;
-
+pub mod imf_render;
 // Re-export for JavaScript
 pub use wasm::bindings::*;
-
+// pub use types::*;
 // Initialize panic hook
 #[wasm_bindgen(start)]
 pub fn start() {
@@ -21,533 +61,704 @@ pub mod bindings;
 pub use bindings::*;
 
 # wasm/bindings.rs
-use wasm_bindgen::prelude::*;
-use web_sys::HtmlCanvasElement;
-use wasm_bindgen::JsCast;
-use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::rc::Rc;
-use std::cell::RefCell;
-use wgpu::*;
-use log::{info, error};
-use wgpu::util::DeviceExt;
-use crate::decoder::{Frame, Queue as FrameQueue};
+    use wasm_bindgen::prelude::*;
+    use web_sys::HtmlCanvasElement;
+    use serde::{Serialize, Deserialize};
+    use std::rc::Rc;
+    use std::cell::RefCell;
+    use wgpu::*;
+    use std::cell::Cell;
+    use log::{info, error, debug};
+    use wgpu::util::DeviceExt;
+    use web_sys::window;
+    use wasm_bindgen::prelude::*;
+    use wasm_bindgen::JsCast;
+    use crate::decoder::{Frame, Queue as FrameQueue};
+    use std::sync::{Arc, Mutex, Weak};
+    use reqwest;
+    use serde_json::Value;
+    use wasm_bindgen_futures::spawn_local;
+    use web_sys::console;
+    use gloo_timers::future::TimeoutFuture;
+    use imf_render::*;
 
-// Remove duplicate imports and update WebGPU imports
-use wgpu::{
-    Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
-    TextureUsages, PresentMode, CompositeAlphaMode, Features, Limits,
-    RequestAdapterOptions, PowerPreference, DeviceDescriptor
-};
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ReferenceFeature {
-    tensor: Vec<f32>,
-    shape: Vec<usize>,
-}
+    // Remove duplicate imports and update WebGPU imports
+    use wgpu::{
+        Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
+        TextureUsages, PresentMode, Features, Limits,
+        RequestAdapterOptions, PowerPreference, DeviceDescriptor
+    };
 
-#[derive(Serialize, Deserialize, Debug)]
-struct ReferenceData {
-    features: Vec<ReferenceFeature>,
-    token: Vec<f32>,
-}
+    #[derive(Serialize, Deserialize, Debug)]
+    struct ReferenceFeature {
+        tensor: Vec<f32>,
+        shape: Vec<usize>,
+    }
 
-#[derive(Serialize, Deserialize)]
-struct FrameToken {
-    token: Vec<f32>,
-    frame_index: usize,
-}
+    #[derive(Serialize, Deserialize, Debug)]
+    struct ReferenceData {
+        features: Vec<ReferenceFeature>,
+        token: Vec<f32>,
+    }
 
-struct RenderContext {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-    pipeline: RenderPipeline,
-    vertex_buffer: Buffer,
-    staging_belt: wgpu::util::StagingBelt,
-    format: TextureFormat,
-    texture: Texture,
-    texture_view: TextureView,
-}
+    #[derive(Serialize, Deserialize)]
+    struct FrameToken {
+        token: Vec<f32>,
+        frame_index: usize,
+    }
 
-impl RenderContext {
-    async fn new_from_canvas(
-        canvas: HtmlCanvasElement,
+    #[derive(Serialize, Deserialize, Debug)]
+    struct BulkTokenResponse {
+        tokens: std::collections::HashMap<usize, Vec<f32>>,
+        metadata: TokenMetadata,
+    }
+
+    #[derive(Serialize, Deserialize, Debug)]
+    struct TokenMetadata {
+        total_frames: usize,
+        processed_frames: usize,
+    }
+
+
+    #[wasm_bindgen]
+    pub struct IMFDecoder {
         width: u32,
         height: u32,
-    ) -> Result<Self, JsValue> {
-        // Create instance with proper descriptor
-        let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::all(),
-            dx12_shader_compiler: Default::default(),
-        });
+        frame_queue: FrameQueue,
+        canvas: Option<HtmlCanvasElement>,
+        render_context: Option<RenderContext>,
+        animation_id: Option<i32>,
+        animation_closure: Option<Closure<dyn FnMut(f64)>>,
+        is_running: Rc<Cell<bool>>,
+        diagnostic_mode: bool,
+        reference_data: Option<ReferenceData>,
+        frame_count: u64,
+        last_frame_time: f64,
 
-        // Get WebGPU adapter
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::default(),
-                force_fallback_adapter: false,
-                compatible_surface: None,
-            })
-            .await
-            .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
-
-        // Create device and queue
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: None,
-                    features: Features::empty(),
-                    limits: Limits::default(),
-                },
-                None,
-            )
-            .await
-            .map_err(|e| JsValue::from_str(&format!("Failed to create device: {:?}", e)))?;
-
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        // Create surface from canvas
-        let surface = instance.create_surface_from_canvas(canvas)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
-
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps.formats[0];
-
-        let surface_config = SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-            format,
-            width,
-            height,
-            present_mode: PresentMode::Fifo,
-            alpha_mode: CompositeAlphaMode::Auto,
-            view_formats: vec![],
-        };
-
-        surface.configure(&device, &surface_config);
-
-        // Create the render context
-        let context = Self::new(device, queue, width, height);
-
-        Ok(context)
+    }
+    impl Drop for IMFDecoder {
+        fn drop(&mut self) {
+            self.stop_player_loop();
+            // Ensure WebGPU resources are properly cleaned up
+            self.render_context = None;
+        }
     }
 
-    fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
-        let format = TextureFormat::Bgra8UnormSrgb;
 
-        let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: ShaderSource::Wgsl(include_str!("../../shaders/shader.wgsl").into()),
-        });
 
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("Output Texture"),
-            size: Extent3d {
+    // Helper struct to store animation state
+    struct AnimationState {
+        closure: Option<Closure<dyn FnMut(f64)>>,
+        id: Option<i32>,
+        last_frame_time: f64,
+        frame_count: u64,
+    }
+
+
+    #[wasm_bindgen]
+    impl IMFDecoder {
+
+        
+        #[wasm_bindgen(constructor)]
+        pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
+            let _ = console_error_panic_hook::set_once();
+            let _ = wasm_logger::init(wasm_logger::Config::default());
+            
+            const QUEUE_SIZE: usize = 60;  // Increased from 60 to 10,000
+            const BATCH_SIZE: usize = 4;      // Keep batch size the same
+            
+            info!("Creating IMFDecoder with dimensions {}x{} and queue capacity {}", 
+                width, height, QUEUE_SIZE);
+
+            Ok(Self {
                 width,
                 height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-
-        let texture_view = texture.create_view(&TextureViewDescriptor::default());
-
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[],
-            push_constant_ranges: &[],
-        });
-
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &[],
-            },
-            fragment: Some(FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-        });
-
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&[-1.0f32, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0]),
-            usage: BufferUsages::VERTEX,
-        });
-
-        let staging_belt = wgpu::util::StagingBelt::new(1024);
-
-        Self {
-            device,
-            queue,
-            pipeline,
-            vertex_buffer,
-            staging_belt,
-            format,
-            texture,
-            texture_view,
+                frame_queue: FrameQueue::new(QUEUE_SIZE, BATCH_SIZE),
+                canvas: None,
+                render_context: None,
+                animation_id: None,
+                reference_data: None,
+                diagnostic_mode: false,
+                frame_count: 0,
+                last_frame_time: 0.0,
+                animation_closure: None,
+                is_running: Rc::new(Cell::new(false)), // Initially not running
+            })
         }
-    }
-}
 
-#[wasm_bindgen]
-pub struct IMFDecoder {
-    width: u32,
-    height: u32,
-    frame_queue: FrameQueue,
-    canvas: Option<HtmlCanvasElement>,
-    render_context: Option<RenderContext>,
-    animation_id: Option<i32>,
-    reference_data: Option<ReferenceData>,
-    diagnostic_mode: bool,
-    frame_count: u64,
-    last_frame_time: f64,
-    animation_closure: Option<Closure<dyn FnMut()>>,
-}
 
-#[wasm_bindgen]
-impl IMFDecoder {
+        #[wasm_bindgen]
+        pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
+            self.canvas = Some(canvas.clone());
+            
+            match RenderContext::create_from_canvas(canvas, self.width, self.height).await {
+                Ok(context) => {
+                    self.render_context = Some(context);
+                    Ok("WebGPU context initialized successfully".to_string())
+                },
+                Err(e) => Err(JsValue::from_str(&format!("Failed to initialize WebGPU context: {:?}", e)))
+            }
+        }
+
+
+        pub async fn load_reference_data(&mut self, video_id: u32) -> Result<String, JsValue> {
+            info!("Loading reference data for video {}", video_id);
+            
+            let client = reqwest::Client::new();
+            let url = format!("https:/chat.covershot.ai/videos/{}/reference", video_id);
+            
+            match client.get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            match response.json::<ReferenceData>().await {
+                                Ok(ref_data) => {
+                                    // Validate shapes
+                                    let expected_shapes = vec![
+                                        vec![1, 128, 64, 64],
+                                        vec![1, 256, 32, 32],
+                                        vec![1, 512, 16, 16],
+                                        vec![1, 512, 8, 8],
+                                    ];
+
+                                    for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
+                                        if feature.shape != *expected {
+                                            return Err(JsValue::from_str(&format!(
+                                                "Invalid tensor shape: {:?}, expected: {:?}", 
+                                                feature.shape, expected
+                                            )));
+                                        }
+                                    }
+
+                                    self.reference_data = Some(ref_data);
+                                    Ok("Reference data loaded successfully".to_string())
+                                },
+                                Err(e) => Err(JsValue::from_str(&format!("Failed to parse reference data: {}", e)))
+                            }
+                        } else {
+                            Err(JsValue::from_str(&format!("Failed to fetch reference data: {}", response.status())))
+                        }
+                    },
+                    Err(e) => Err(JsValue::from_str(&format!("Network error: {}", e)))
+                }
+        }
+
+        // Add method to fetch bulk tokens
+        pub async fn fetch_bulk_tokens(&mut self, video_id: u32, start_frame: usize, end_frame: usize) 
+            -> Result<String, JsValue> {
+            info!("Fetching bulk tokens for video {} (frames {}-{})", video_id, start_frame, end_frame);
+            
+            let client = reqwest::Client::new();
+            let url = format!(
+                "https://chat.covershot.ai/videos/{}/tokens?start={}&end={}", 
+                video_id, start_frame, end_frame
+            );
+            
+            match client.get(&url)
+                .header("Accept", "application/json")
+                .send()
+                .await {
+                    Ok(response) => {
+                        if response.status().is_success() {
+                            match response.json::<BulkTokenResponse>().await {
+                                Ok(token_data) => {
+                                    // Convert tokens to frames and add to queue
+                                    for (frame_index, token) in token_data.tokens {
+                                        let mut frame = Frame::new(self.width as usize, self.height as usize);
+                                        let frame_data: Vec<u8> = token.iter().map(|&x| x as u8).collect();
+                                        frame.set_data(frame_data);
+                                        self.frame_queue.push(frame);
+                                    }
+
+                                    Ok(format!(
+                                        "Processed {} frames ({}/{})", 
+                                        token_data.tokens.len(),
+                                        token_data.metadata.processed_frames,
+                                        token_data.metadata.total_frames
+                                    ))
+                                },
+                                Err(e) => Err(JsValue::from_str(&format!("Failed to parse token data: {}", e)))
+                            }
+                        } else {
+                            Err(JsValue::from_str(&format!("Failed to fetch tokens: {}", response.status())))
+                        }
+                    },
+                    Err(e) => Err(JsValue::from_str(&format!("Network error: {}", e)))
+                }
+        }
+
+        
+        pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
+            info!("Starting token processing...");
+            
+            let token_data: BulkTokenResponse = serde_wasm_bindgen::from_value(tokens)?;
+            let token_count = token_data.tokens.len();
+    
+            info!("Processing {} tokens", token_count);
+            
+            // Use reference to avoid moving token_data.tokens
+            for (&frame_idx, token) in token_data.tokens.iter() {
+                info!("Processing token with frame index {}", frame_idx);
+                debug!("Token data length: {}", token.len());
+                
+                let mut frame = Frame::new(self.width as usize, self.height as usize);
+                let frame_data: Vec<u8> = token.iter().map(|&x| x as u8).collect();
+                debug!("Converted frame data length: {}", frame_data.len());
+                
+                frame.set_data(frame_data);
+                debug!("Frame data set, pushing to queue");
+                
+                self.frame_queue.push(frame);
+            }
+            
+            info!("Token processing complete");
+            Ok(format!("Successfully processed {} tokens", token_count))
+        }
+    
+        // Fixed background token fetching with proper ownership
+        pub fn start_background_token_fetching(self: &Arc<Mutex<Self>>, video_id: u32, start_frame: usize) {
+            let chunk_size = 100;
+            let is_running = self.is_running.clone();
+            let decoder = Arc::clone(self);
+            
+            spawn_local(async move {
+                let mut current_start = start_frame;
+                
+                while is_running.get() {
+                    let result = {
+                        let mut decoder = decoder.lock().unwrap();
+                        decoder.fetch_bulk_tokens(video_id, current_start, current_start + chunk_size - 1).await
+                    };
+    
+                    match result {
+                        Ok(_) => {
+                            current_start += chunk_size;
+                            // Use TimeoutFuture instead of sleep
+                            TimeoutFuture::new(1000).await;
+                        },
+                        Err(e) => {
+                            console::error_1(&format!("Background token fetching error: {:?}", e).into());
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        #[wasm_bindgen]
+        pub fn get_capabilities(&self) -> JsValue {
+            let capabilities = js_sys::Object::new();
+            
+            js_sys::Reflect::set(
+                &capabilities,
+                &"version".into(),
+                &"1.0.0".into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &capabilities,
+                &"dimensions".into(),
+                &format!("{}x{}", self.width, self.height).into()
+            ).unwrap();
+
+            // Create features array
+            let features = js_sys::Array::new();
+            features.push(&"WebGPU".into());
+            features.push(&"Tensor Processing".into());
+            features.push(&"Frame Queue".into());
+
+            js_sys::Reflect::set(
+                &capabilities,
+                &"features".into(),
+                &features
+            ).unwrap();
+
+            // Create methods array
+            let methods = js_sys::Array::new();
+            methods.push(&"test".into());
+            methods.push(&"start_player_loop".into());
+            methods.push(&"stop_player_loop".into());
+            methods.push(&"set_reference_data".into());
+            methods.push(&"process_tokens".into());
+            methods.push(&"process_batch".into());
+
+            js_sys::Reflect::set(
+                &capabilities,
+                &"methods".into(),
+                &methods
+            ).unwrap();
+
+            // Add performance capabilities
+            let performance = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &performance,
+                &"maxQueueSize".into(),
+                &(60_i32).into()
+            ).unwrap();
+            js_sys::Reflect::set(
+                &performance,
+                &"batchSize".into(),
+                &(4_i32).into()
+            ).unwrap();
+            js_sys::Reflect::set(
+                &performance,
+                &"targetFPS".into(),
+                &(60_i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &capabilities,
+                &"performance".into(),
+                &performance
+            ).unwrap();
+
+            // Add diagnostic info
+            let diagnostics = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &diagnostics,
+                &"frameCounter".into(),
+                &(self.frame_count as i32).into()
+            ).unwrap();
+            js_sys::Reflect::set(
+                &diagnostics,
+                &"diagnosticMode".into(),
+                &self.diagnostic_mode.into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &capabilities,
+                &"diagnostics".into(),
+                &diagnostics
+            ).unwrap();
+
+            capabilities.into()
+        }
+
+        #[wasm_bindgen]
+        pub fn test(&self) -> String {
+            let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
+            info!("{}", msg);
+            msg
+        }
+
+        #[wasm_bindgen]
+        pub fn get_status(&self) -> JsValue {
+            let status = js_sys::Object::new();
+
+            // Basic status
+            js_sys::Reflect::set(
+                &status,
+                &"initialized".into(),
+                &self.render_context.is_some().into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &status,
+                &"running".into(),
+                &self.animation_id.is_some().into()
+            ).unwrap();
+
+            // Performance metrics
+            let metrics = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &metrics,
+                &"frameCount".into(),
+                &(self.frame_count as i32).into()
+            ).unwrap();
+            
+            if let Some(window) = web_sys::window() {
+                if let Some(perf) = window.performance() {
+                    js_sys::Reflect::set(
+                        &metrics,
+                        &"lastFrameTime".into(),
+                        &self.last_frame_time.into()
+                    ).unwrap();
+                }
+            }
+
+            js_sys::Reflect::set(&status, &"metrics".into(), &metrics).unwrap();
+
+            // Queue status using correct method names
+            let queue_status = js_sys::Object::new();
+            let (input_size, processing_size, output_size) = self.frame_queue.get_queue_sizes();
+            
+            js_sys::Reflect::set(
+                &queue_status,
+                &"inputQueueSize".into(),
+                &(input_size as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"processingQueueSize".into(),
+                &(processing_size as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"outputQueueSize".into(),
+                &(output_size as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"maxSize".into(),
+                &(self.frame_queue.get_max_size() as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"batchSize".into(),
+                &(self.frame_queue.get_batch_size() as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"isFull".into(),
+                &self.frame_queue.is_full().into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"isEmpty".into(),
+                &self.frame_queue.is_empty().into()
+            ).unwrap();
+
+            // Add additional metrics
+            js_sys::Reflect::set(
+                &queue_status,
+                &"framesProcessed".into(),
+                &(self.frame_queue.get_frames_processed() as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"framesDropped".into(),
+                &(self.frame_queue.get_frames_dropped() as i32).into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"processingTime".into(),
+                &self.frame_queue.get_processing_time().into()
+            ).unwrap();
+
+            // Add queue stats
+            let stats = self.frame_queue.get_metrics();
+            let queue_metrics = js_sys::Object::new();
+            
+            js_sys::Reflect::set(
+                &queue_metrics,
+                &"averageProcessingTime".into(),
+                &stats.average_processing_time.into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_metrics,
+                &"queueUtilization".into(),
+                &stats.queue_utilization.into()
+            ).unwrap();
+
+            js_sys::Reflect::set(
+                &queue_status,
+                &"metrics".into(),
+                &queue_metrics
+            ).unwrap();
+
+            js_sys::Reflect::set(&status, &"queue".into(), &queue_status).unwrap();
+
+            // Debug info
+            let debug = js_sys::Object::new();
+            js_sys::Reflect::set(
+                &debug,
+                &"diagnosticMode".into(),
+                &self.diagnostic_mode.into()
+            ).unwrap();
+
+            js_sys::Reflect::set(&status, &"debug".into(), &debug).unwrap();
+
+            status.into()
+        }
+
+
+
+
+        #[wasm_bindgen(getter)]
+        pub fn diagnostic_mode(&self) -> bool {
+            self.diagnostic_mode
+        }
+
+        #[wasm_bindgen(setter)]
+        pub fn set_diagnostic_mode(&mut self, value: bool) {
+            self.diagnostic_mode = value;
+            info!("Diagnostic mode set to: {}", value);
+        }
+
+        #[wasm_bindgen]
+        pub fn set_reference_data(&mut self, data: JsValue) -> Result<String, JsValue> {
+            info!("Setting reference data...");
+            
+            let ref_data: ReferenceData = serde_wasm_bindgen::from_value(data)?;
+            
+            let expected_shapes = vec![
+                vec![1, 128, 64, 64],
+                vec![1, 256, 32, 32],
+                vec![1, 512, 16, 16],
+                vec![1, 512, 8, 8],
+            ];
+
+            for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
+                if feature.shape != *expected {
+                    return Err(JsValue::from_str(&format!(
+                        "Invalid tensor shape: {:?}, expected: {:?}", 
+                        feature.shape, expected
+                    )));
+                }
+            }
+
+            if ref_data.token.len() != 32 {
+                return Err(JsValue::from_str("Reference token must be length 32"));
+            }
+
+            self.reference_data = Some(ref_data);
+            Ok("Reference data set successfully".to_string())
+        }
 
     
-    #[wasm_bindgen(constructor)]
-    pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
-        console_error_panic_hook::set_once();
-        wasm_logger::init(wasm_logger::Config::default());
-        info!("Creating IMFDecoder with dimensions {}x{}", width, height);
-
-        Ok(Self {
-            width,
-            height,
-            frame_queue: FrameQueue::new(60, 4),
-            canvas: None,
-            render_context: None,
-            animation_id: None,
-            reference_data: None,
-            diagnostic_mode: false,
-            frame_count: 0,
-            last_frame_time: 0.0,
-            animation_closure: None,
-        })
-    }
-
-
-    #[wasm_bindgen]
-    pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
-        self.canvas = Some(canvas.clone());
         
-        match RenderContext::new_from_canvas(canvas, self.width, self.height).await {
-            Ok(context) => {
-                self.render_context = Some(context);
-                Ok("WebGPU context initialized successfully".to_string())
-            },
-            Err(e) => Err(JsValue::from_str(&format!("Failed to initialize WebGPU context: {:?}", e)))
+    
+
+
+        #[wasm_bindgen]
+        pub async fn start_playback(&mut self, video_id: u32) -> Result<(), JsValue> {
+            info!("Starting playback for video {}", video_id);
+
+            // Load reference data first
+            self.load_reference_data(video_id).await?;
+
+            // Prefetch initial frames
+            let prefetch_size = (self.frame_queue.get_max_size() as f32 * 1.5) as usize;
+            self.fetch_bulk_tokens(video_id, 0, prefetch_size - 1).await?;
+
+            // Start background fetching
+            self.start_background_token_fetching(video_id, prefetch_size);
+
+            // Start player loop
+            self.start_player_loop()?;
+
+            Ok(())
         }
-    }
 
-    #[wasm_bindgen]
-    pub fn get_capabilities(&self) -> JsValue {
-        let capabilities = js_sys::Object::new();
-        
-        js_sys::Reflect::set(
-            &capabilities,
-            &"version".into(),
-            &"1.0.0".into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &capabilities,
-            &"dimensions".into(),
-            &format!("{}x{}", self.width, self.height).into()
-        ).unwrap();
-
-        // Create features array
-        let features = js_sys::Array::new();
-        features.push(&"WebGPU".into());
-        features.push(&"Tensor Processing".into());
-        features.push(&"Frame Queue".into());
-
-        js_sys::Reflect::set(
-            &capabilities,
-            &"features".into(),
-            &features
-        ).unwrap();
-
-        // Create methods array
-        let methods = js_sys::Array::new();
-        methods.push(&"test".into());
-        methods.push(&"start_player_loop".into());
-        methods.push(&"stop_player_loop".into());
-        methods.push(&"set_reference_data".into());
-        methods.push(&"process_tokens".into());
-        methods.push(&"process_batch".into());
-
-        js_sys::Reflect::set(
-            &capabilities,
-            &"methods".into(),
-            &methods
-        ).unwrap();
-
-        // Add performance capabilities
-        let performance = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &performance,
-            &"maxQueueSize".into(),
-            &(60_i32).into()
-        ).unwrap();
-        js_sys::Reflect::set(
-            &performance,
-            &"batchSize".into(),
-            &(4_i32).into()
-        ).unwrap();
-        js_sys::Reflect::set(
-            &performance,
-            &"targetFPS".into(),
-            &(60_i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &capabilities,
-            &"performance".into(),
-            &performance
-        ).unwrap();
-
-        // Add diagnostic info
-        let diagnostics = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &diagnostics,
-            &"frameCounter".into(),
-            &(self.frame_count as i32).into()
-        ).unwrap();
-        js_sys::Reflect::set(
-            &diagnostics,
-            &"diagnosticMode".into(),
-            &self.diagnostic_mode.into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &capabilities,
-            &"diagnostics".into(),
-            &diagnostics
-        ).unwrap();
-
-        capabilities.into()
-    }
-
-    #[wasm_bindgen]
-    pub fn test(&self) -> String {
-        let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
-        info!("{}", msg);
-        msg
-    }
-
-    #[wasm_bindgen]
-    pub fn get_status(&self) -> JsValue {
-        let status = js_sys::Object::new();
-
-        // Basic status
-        js_sys::Reflect::set(
-            &status,
-            &"initialized".into(),
-            &self.render_context.is_some().into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &status,
-            &"running".into(),
-            &self.animation_id.is_some().into()
-        ).unwrap();
-
-        // Performance metrics
-        let metrics = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &metrics,
-            &"frameCount".into(),
-            &(self.frame_count as i32).into()
-        ).unwrap();
-        
-        if let Some(window) = web_sys::window() {
-            if let Some(perf) = window.performance() {
-                js_sys::Reflect::set(
-                    &metrics,
-                    &"lastFrameTime".into(),
-                    &self.last_frame_time.into()
-                ).unwrap();
+        #[wasm_bindgen]
+        pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
+            if self.is_running.get() {
+                return Ok(());
             }
-        }
 
-        js_sys::Reflect::set(&status, &"metrics".into(), &metrics).unwrap();
-
-        // Queue status using correct method names
-        let queue_status = js_sys::Object::new();
-        let (input_size, processing_size, output_size) = self.frame_queue.get_queue_sizes();
-        
-        js_sys::Reflect::set(
-            &queue_status,
-            &"inputQueueSize".into(),
-            &(input_size as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"processingQueueSize".into(),
-            &(processing_size as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"outputQueueSize".into(),
-            &(output_size as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"maxSize".into(),
-            &(self.frame_queue.get_max_size() as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"batchSize".into(),
-            &(self.frame_queue.get_batch_size() as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"isFull".into(),
-            &self.frame_queue.is_full().into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"isEmpty".into(),
-            &self.frame_queue.is_empty().into()
-        ).unwrap();
-
-        // Add additional metrics
-        js_sys::Reflect::set(
-            &queue_status,
-            &"framesProcessed".into(),
-            &(self.frame_queue.get_frames_processed() as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"framesDropped".into(),
-            &(self.frame_queue.get_frames_dropped() as i32).into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"processingTime".into(),
-            &self.frame_queue.get_processing_time().into()
-        ).unwrap();
-
-        // Add queue stats
-        let stats = self.frame_queue.get_metrics();
-        let queue_metrics = js_sys::Object::new();
-        
-        js_sys::Reflect::set(
-            &queue_metrics,
-            &"averageProcessingTime".into(),
-            &stats.average_processing_time.into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_metrics,
-            &"queueUtilization".into(),
-            &stats.queue_utilization.into()
-        ).unwrap();
-
-        js_sys::Reflect::set(
-            &queue_status,
-            &"metrics".into(),
-            &queue_metrics
-        ).unwrap();
-
-        js_sys::Reflect::set(&status, &"queue".into(), &queue_status).unwrap();
-
-        // Debug info
-        let debug = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &debug,
-            &"diagnosticMode".into(),
-            &self.diagnostic_mode.into()
-        ).unwrap();
-
-        js_sys::Reflect::set(&status, &"debug".into(), &debug).unwrap();
-
-        status.into()
-    }
-
-    #[wasm_bindgen]
-    pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
-        // Create a shared reference to self
-        let decoder = Rc::new(RefCell::new(self as *mut IMFDecoder));
-        let decoder_clone = decoder.clone();
-
-        // Create the animation frame closure
-        let closure = Closure::wrap(Box::new(move || {
-            let decoder = unsafe { &mut *decoder_clone.borrow().clone() };
+            self.is_running.set(true);
+            let is_running = self.is_running.clone();
             
-            if let Err(e) = decoder.render_frame() {
-                error!("Render error: {:?}", e);
+            // Create decoder pointer
+            let decoder_ptr = self as *mut IMFDecoder;
+
+            // Create and store the closure directly
+            let closure = Closure::new(move |timestamp: f64| {
+                if !is_running.get() {
+                    return;
+                }
+
+                // Process frame
+                let decoder = unsafe { &mut *decoder_ptr };
+                decoder.animation_frame_callback(timestamp);
+
+                // Schedule next frame
+                if is_running.get() {
+                    if let Some(window) = web_sys::window() {
+                        if let Some(animation_id) = decoder.animation_id {
+                            let _ = window.request_animation_frame(
+                                decoder.animation_closure.as_ref().unwrap().as_ref().unchecked_ref()
+                            );
+                        }
+                    }
+                }
+            });
+
+            // Start animation loop
+            if let Some(window) = web_sys::window() {
+                let id = window.request_animation_frame(
+                    closure.as_ref().unchecked_ref()
+                )?;
+                
+                self.animation_id = Some(id);
+                // Store the closure directly without cloning
+                self.animation_closure = Some(closure);
             }
 
-            // Request next frame
-            if let Some(window) = web_sys::window() {
-                if let Ok(id) = window.request_animation_frame(
-                    decoder.animation_closure.as_ref().unwrap().as_ref().unchecked_ref()
-                ) {
-                    decoder.animation_id = Some(id);
+            Ok(())
+        }
+
+
+        fn animation_frame_callback(&mut self, timestamp: f64) {
+            let delta = timestamp - self.last_frame_time;
+            
+            if delta >= 16.666 {  // Target ~60 FPS
+                self.last_frame_time = timestamp;
+                
+                if let Err(e) = self.render_frame() {
+                    error!("Render error: {:?}", e);
+                } else {
+                    self.frame_count += 1;
+                }
+                
+                if self.diagnostic_mode {
+                    self.update_metrics();
+                }
+            }
+        }
+
+        #[wasm_bindgen]
+        pub fn stop_player_loop(&mut self) {
+            debug!("Stopping player loop");
+            
+            // Set running flag to false first
+            self.is_running.set(false);
+            
+            // Cancel animation frame
+            if let Some(id) = self.animation_id.take() {
+                if let Some(window) = web_sys::window() {
+                    let _ = window.cancel_animation_frame(id);
+                    debug!("Cancelled animation frame {}", id);
                 }
             }
             
-            decoder.frame_count += 1;
-        }) as Box<dyn FnMut()>);
+            // Clean up closure
+            self.animation_closure = None;
+            
+            info!("Player loop stopped successfully");
+        }
 
-        // Start the animation loop
-        let window = web_sys::window()
-            .ok_or_else(|| JsValue::from_str("No window found"))?;
+        fn render_frame(&mut self) -> Result<(), JsValue> {
+            let context = self.render_context.as_ref()
+                .ok_or_else(|| JsValue::from_str("Render context not initialized"))?;
 
-        let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
-        
-        self.animation_id = Some(id);
-        self.animation_closure = Some(closure);
+            // Get frame data
+            let frame = if let Some(frame) = self.frame_queue.process_next() {
+                frame
+            } else {
+                // Create a dummy frame if no frame is available
+                let dummy_data = vec![0u8; (self.width * self.height * 4) as usize];
+                let mut frame = Frame::new(self.width as usize, self.height as usize);
+                frame.set_data(dummy_data);
+                frame
+            };
 
-        Ok(())
-    }
-
-    fn render_frame(&mut self) -> Result<(), JsValue> {
-        let context = self.render_context.as_ref()
-            .ok_or_else(|| JsValue::from_str("Render context not initialized"))?;
-
-        if let Some(frame) = self.frame_queue.process_next() {
-            // Create command encoder
-            let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-            // Update texture with frame data
+            // Write to source texture
             context.queue.write_texture(
                 ImageCopyTexture {
-                    texture: &context.texture,
+                    texture: &context.source_texture,
                     mip_level: 0,
                     origin: Origin3d::ZERO,
                     aspect: TextureAspect::All,
@@ -565,12 +776,17 @@ impl IMFDecoder {
                 },
             );
 
-            // Render pass
+            // Create command encoder
+            let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+            // Record render pass
             {
                 let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Main Render Pass"),
                     color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &context.texture_view,
+                        view: &context.output_texture_view,
                         resolve_target: None,
                         ops: Operations {
                             load: LoadOp::Clear(Color::BLACK),
@@ -581,146 +797,85 @@ impl IMFDecoder {
                 });
 
                 render_pass.set_pipeline(&context.pipeline);
+                render_pass.set_bind_group(0, &context.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
                 render_pass.draw(0..4, 0..1);
             }
 
             // Submit commands
             context.queue.submit(std::iter::once(encoder.finish()));
-
-            if self.diagnostic_mode {
-                self.update_metrics();
-            }
+            Ok(())
         }
 
-        Ok(())
-    }
 
-    fn update_metrics(&mut self) {
-        if let Some(window) = web_sys::window() {
-            if let Some(performance) = window.performance() {
-                let now = performance.now();
-                let frame_time = now - self.last_frame_time;
-                self.last_frame_time = now;
-
-                let fps = 1000.0 / frame_time;
-                info!("Frame {}: {:.2} FPS (frame time: {:.2}ms)", 
-                    self.frame_count, fps, frame_time);
-            }
-        }
-    }
-    
-    #[wasm_bindgen]
-    pub fn stop_player_loop(&mut self) {
-        if let Some(id) = self.animation_id.take() {
+        fn update_metrics(&mut self) {
             if let Some(window) = web_sys::window() {
-                let _ = window.cancel_animation_frame(id);
-            }
-        }
-        self.animation_closure = None;
-        info!("Player loop stopped");
-    }
+                if let Some(_performance) = window.performance() {  // Fixed unused variable warning
+                    let now = _performance.now();
+                    let frame_time = now - self.last_frame_time;
+                    self.last_frame_time = now;
 
-
-    #[wasm_bindgen(getter)]
-    pub fn diagnostic_mode(&self) -> bool {
-        self.diagnostic_mode
-    }
-
-    #[wasm_bindgen(setter)]
-    pub fn set_diagnostic_mode(&mut self, value: bool) {
-        self.diagnostic_mode = value;
-        info!("Diagnostic mode set to: {}", value);
-    }
-
-    #[wasm_bindgen]
-    pub fn set_reference_data(&mut self, data: JsValue) -> Result<String, JsValue> {
-        info!("Setting reference data...");
-        
-        let ref_data: ReferenceData = serde_wasm_bindgen::from_value(data)?;
-        
-        let expected_shapes = vec![
-            vec![1, 128, 64, 64],
-            vec![1, 256, 32, 32],
-            vec![1, 512, 16, 16],
-            vec![1, 512, 8, 8],
-        ];
-
-        for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
-            if feature.shape != *expected {
-                return Err(JsValue::from_str(&format!(
-                    "Invalid tensor shape: {:?}, expected: {:?}", 
-                    feature.shape, expected
-                )));
+                    let fps = 1000.0 / frame_time;
+                    let (input_size, processing_size, output_size) = self.frame_queue.get_queue_sizes();
+                    
+                    debug!("Performance metrics:");
+                    debug!("  - Frame time: {:.2}ms", frame_time);
+                    debug!("  - FPS: {:.2}", fps);
+                    debug!("  - Queue sizes - Input: {}, Processing: {}, Output: {}", 
+                        input_size, processing_size, output_size);
+                    
+                    if self.frame_count % 60 == 0 {
+                        info!("Performance report:");
+                        info!("  - Average FPS: {:.2}", fps);
+                        info!("  - Frame time: {:.2}ms", frame_time);
+                        info!("  - Frames processed: {}", self.frame_count);
+                        info!("  - Queue utilization: {}/{}", 
+                            input_size + processing_size + output_size,
+                            self.frame_queue.get_max_size());
+                    }
+                }
             }
         }
 
-        if ref_data.token.len() != 32 {
-            return Err(JsValue::from_str("Reference token must be length 32"));
+
+        #[wasm_bindgen]
+        pub fn process_batch(&mut self) -> Result<String, JsValue> {
+            info!("Processing batch...");
+            let processed = self.frame_queue.process_batch();
+            Ok(format!("Processed batch: {} frames", processed.len()))
         }
 
-        self.reference_data = Some(ref_data);
-        Ok("Reference data set successfully".to_string())
-    }
-
-    #[wasm_bindgen]
-    pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
-        info!("Processing tokens...");
-        
-        let frame_tokens: Vec<FrameToken> = serde_wasm_bindgen::from_value(tokens)?;
-        let token_count = frame_tokens.len();
-        
-        for token in frame_tokens {
-            let mut frame = Frame::new(self.width as usize, self.height as usize);
-            frame.set_data(token.token.iter().map(|&x| x as u8).collect());
-            self.frame_queue.push(frame);
-        }
-        
-        Ok(format!("Processed {} tokens successfully", token_count))
-    }
-
-    #[wasm_bindgen]
-    pub fn process_batch(&mut self) -> Result<String, JsValue> {
-        info!("Processing batch...");
-        let processed = self.frame_queue.process_batch();
-        Ok(format!("Processed batch: {} frames", processed.len()))
-    }
-
-    #[wasm_bindgen]
-    pub fn get_reference_status(&self) -> String {
-        match &self.reference_data {
-            Some(ref_data) => format!(
-                "Reference data loaded: {} features",
-                ref_data.features.len()
-            ),
-            None => "No reference data loaded".to_string(),
+        #[wasm_bindgen]
+        pub fn get_reference_status(&self) -> String {
+            match &self.reference_data {
+                Some(ref_data) => format!(
+                    "Reference data loaded: {} features",
+                    ref_data.features.len()
+                ),
+                None => "No reference data loaded".to_string(),
+            }
         }
     }
-}
 
-impl Drop for IMFDecoder {
-    fn drop(&mut self) {
-        self.stop_player_loop();
+
+
+    // Helper struct for passing tensor data between Rust and JavaScript
+    #[derive(Serialize, Deserialize)]
+    struct TensorData {
+        data: Vec<f32>,
+        shape: Vec<usize>,
     }
-}
 
-// Helper struct for passing tensor data between Rust and JavaScript
-#[derive(Serialize, Deserialize)]
-struct TensorData {
-    data: Vec<f32>,
-    shape: Vec<usize>,
-}
+    // JavaScript bindings for IMF operations
+    #[wasm_bindgen]
+    extern "C" {
+        // Define JavaScript functions that will be called from Rust
+        #[wasm_bindgen(js_namespace = tf, js_name = tensor)]
+        fn create_tensor(data: &[f32], shape: &[usize]) -> JsValue;
 
-// JavaScript bindings for IMF operations
-#[wasm_bindgen]
-extern "C" {
-    // Define JavaScript functions that will be called from Rust
-    #[wasm_bindgen(js_namespace = tf, js_name = tensor)]
-    fn create_tensor(data: &[f32], shape: &[usize]) -> JsValue;
-
-    #[wasm_bindgen(js_namespace = tf, js_name = tidy)]
-    fn tensor_tidy(callback: &Closure<dyn FnMut() -> JsValue>) -> JsValue;
-}
+        #[wasm_bindgen(js_namespace = tf, js_name = tidy)]
+        fn tensor_tidy(callback: &Closure<dyn FnMut() -> JsValue>) -> JsValue;
+    }
 
 # decoder/webgl.rs
 use wasm_bindgen::prelude::*;
@@ -1367,6 +1522,420 @@ pub mod metrics;
 
 pub use memory::Memory;
 pub use metrics::Metrics;
+
+# imf_render/mod.rs
+pub use context::RenderContext::*;
+
+# imf_render/context.rs
+use wasm_bindgen::prelude::*;
+use web_sys::HtmlCanvasElement;
+use serde::{Serialize, Deserialize};
+use std::rc::Rc;
+use std::cell::RefCell;
+use wgpu::*;
+use std::cell::Cell;
+use log::{info, error, debug};
+use wgpu::util::DeviceExt;
+use web_sys::window;
+use wasm_bindgen::prelude::*;
+use wasm_bindgen::JsCast;
+use crate::decoder::{Frame, Queue as FrameQueue};
+use std::sync::{Arc, Mutex, Weak};
+use reqwest;
+use serde_json::Value;
+use wasm_bindgen_futures::spawn_local;
+use web_sys::console;
+use gloo_timers::future::TimeoutFuture;
+
+// Remove duplicate imports and update WebGPU imports
+use wgpu::{
+    Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
+    TextureUsages, PresentMode, Features, Limits,
+    RequestAdapterOptions, PowerPreference, DeviceDescriptor
+};
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceFeature {
+    tensor: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceData {
+    features: Vec<ReferenceFeature>,
+    token: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrameToken {
+    token: Vec<f32>,
+    frame_index: usize,
+}
+
+struct RenderContext {
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    pipeline: RenderPipeline,
+    vertex_buffer: Buffer,
+    staging_belt: wgpu::util::StagingBelt,
+    format: TextureFormat,
+    // Separate textures for input and output
+    source_texture: Texture,
+    source_texture_view: TextureView,
+    output_texture: Texture,
+    output_texture_view: TextureView,
+    bind_group: BindGroup,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct BulkTokenResponse {
+    tokens: std::collections::HashMap<usize, Vec<f32>>,
+    metadata: TokenMetadata,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct TokenMetadata {
+    total_frames: usize,
+    processed_frames: usize,
+}
+
+
+impl RenderContext {
+
+    fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
+        let format = TextureFormat::Bgra8UnormSrgb;
+
+        // Create vertex buffer layout
+        let vertex_buffers = [VertexBufferLayout {
+            array_stride: 16,
+            step_mode: VertexStepMode::Vertex,
+            attributes: &[
+                VertexAttribute {
+                    format: VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0,
+                },
+                VertexAttribute {
+                    format: VertexFormat::Float32x2,
+                    offset: 8,
+                    shader_location: 1,
+                },
+            ],
+        }];
+
+        // Create shader
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: ShaderSource::Wgsl(r#"
+                struct VertexInput {
+                    @location(0) position: vec2<f32>,
+                    @location(1) tex_coords: vec2<f32>,
+                };
+
+                struct VertexOutput {
+                    @builtin(position) clip_position: vec4<f32>,
+                    @location(0) tex_coords: vec2<f32>,
+                };
+
+                @group(0) @binding(0) var t_diffuse: texture_2d<f32>;
+                @group(0) @binding(1) var s_diffuse: sampler;
+
+                @vertex
+                fn vs_main(in: VertexInput) -> VertexOutput {
+                    var out: VertexOutput;
+                    out.tex_coords = in.tex_coords;
+                    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+                    return out;
+                }
+
+                @fragment
+                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                    return textureSample(t_diffuse, s_diffuse, in.tex_coords);
+                }
+            "#.into()),
+        });
+
+        // Create sampler
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            label: Some("Main Sampler"),
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        // Create source texture
+        let source_texture = device.create_texture(&TextureDescriptor {
+            label: Some("Source Texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        // Create output texture
+        let output_texture = device.create_texture(&TextureDescriptor {
+            label: Some("Output Texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+
+        // Create texture views
+        let source_texture_view = source_texture.create_view(&TextureViewDescriptor {
+            label: Some("Source Texture View"),
+            format: Some(format),
+            dimension: Some(TextureViewDimension::D2),
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
+
+        let output_texture_view = output_texture.create_view(&TextureViewDescriptor {
+            label: Some("Output Texture View"),
+            format: Some(format),
+            dimension: Some(TextureViewDimension::D2),
+            aspect: TextureAspect::All,
+            base_mip_level: 0,
+            mip_level_count: None,
+            base_array_layer: 0,
+            array_layer_count: None,
+        });
+
+        // Create bind group layout
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Texture Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        // Create bind group
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&source_texture_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+
+        // Create pipeline layout
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Create render pipeline
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &vertex_buffers,
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState::REPLACE),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+        });
+
+        // Create vertex buffer
+        let vertex_buffer_data = [
+            -1.0f32, -1.0, 0.0, 1.0,
+            1.0, -1.0, 1.0, 1.0,
+            -1.0, 1.0, 0.0, 0.0,
+            1.0, 1.0, 1.0, 0.0,
+        ];
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertex_buffer_data),
+            usage: BufferUsages::VERTEX,
+        });
+
+        let staging_belt = wgpu::util::StagingBelt::new(1024);
+
+        Self {
+            device,
+            queue,
+            pipeline,
+            vertex_buffer,
+            staging_belt,
+            format,
+            source_texture,
+            source_texture_view,
+            output_texture,
+            output_texture_view,
+            bind_group,
+        }
+    }
+
+    async fn create_from_canvas(canvas: HtmlCanvasElement, width: u32, height: u32) -> Result<Self, JsValue> {
+        // Create instance
+        let instance = Instance::new(InstanceDescriptor {
+            backends: Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
+    
+        // Create surface from canvas
+        let surface = instance.create_surface_from_canvas(canvas)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
+    
+        // Request adapter
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
+    
+        web_sys::console::log_1(&"Adapter acquired".into());
+        
+        // Request device
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: None,
+                    features: Features::empty(),
+                    limits: Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to create device: {:?}", e)))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        
+        // Configure surface using device and adapter capabilities
+        let surface_caps = surface.get_capabilities(&adapter);
+        let format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+            
+        // Configure surface
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: PresentMode::Fifo,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+    
+        surface.configure(&device, &config);
+        
+        // Create RenderContext using primary constructor
+        Ok(Self::new(device.clone(), queue.clone(), width, height))
+    }
+    
+    
+}
+
+# network.rs
+// network.rs - Network operations
+use wasm_bindgen::prelude::*;
+use crate::types::*;
+
+pub struct NetworkClient {
+    client: reqwest::Client,
+    base_url: String,
+}
+
+impl NetworkClient {
+    pub fn new(base_url: &str) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url: base_url.to_string(),
+        }
+    }
+
+    pub async fn fetch_reference_data(&self, video_id: u32) -> Result<ReferenceData, JsValue> {
+        let url = format!("{}/videos/{}/reference", self.base_url, video_id);
+        // Move reference data fetching logic here
+    }
+
+    pub async fn fetch_bulk_tokens(
+        &self, 
+        video_id: u32, 
+        start_frame: usize, 
+        end_frame: usize
+    ) -> Result<BulkTokenResponse, JsValue> {
+        let url = format!(
+            "{}/videos/{}/tokens?start={}&end={}", 
+            self.base_url, video_id, start_frame, end_frame
+        );
+        // Move bulk token fetching logic here
+    }
+}
 
 # player.rs
 use wasm_bindgen::prelude::*;
