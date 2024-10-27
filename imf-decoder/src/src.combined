@@ -33,6 +33,13 @@ use log::{info, error};
 use wgpu::util::DeviceExt;
 use crate::decoder::{Frame, Queue as FrameQueue};
 
+// Remove duplicate imports and update WebGPU imports
+use wgpu::{
+    Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
+    TextureUsages, PresentMode, CompositeAlphaMode, Features, Limits,
+    RequestAdapterOptions, PowerPreference, DeviceDescriptor
+};
+
 #[derive(Serialize, Deserialize, Debug)]
 struct ReferenceFeature {
     tensor: Vec<f32>,
@@ -63,6 +70,68 @@ struct RenderContext {
 }
 
 impl RenderContext {
+    async fn new_from_canvas(
+        canvas: HtmlCanvasElement,
+        width: u32,
+        height: u32,
+    ) -> Result<Self, JsValue> {
+        // Create instance with proper descriptor
+        let instance = Instance::new(InstanceDescriptor {
+            backends: Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
+
+        // Get WebGPU adapter
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::default(),
+                force_fallback_adapter: false,
+                compatible_surface: None,
+            })
+            .await
+            .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
+
+        // Create device and queue
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: None,
+                    features: Features::empty(),
+                    limits: Limits::default(),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to create device: {:?}", e)))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+
+        // Create surface from canvas
+        let surface = instance.create_surface_from_canvas(canvas)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
+
+        let surface_caps = surface.get_capabilities(&adapter);
+        let format = surface_caps.formats[0];
+
+        let surface_config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+            format,
+            width,
+            height,
+            present_mode: PresentMode::Fifo,
+            alpha_mode: CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+
+        surface.configure(&device, &surface_config);
+
+        // Create the render context
+        let context = Self::new(device, queue, width, height);
+
+        Ok(context)
+    }
+
     fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
         let format = TextureFormat::Bgra8UnormSrgb;
 
@@ -177,6 +246,21 @@ impl IMFDecoder {
             animation_closure: None,
         })
     }
+
+
+    #[wasm_bindgen]
+    pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
+        self.canvas = Some(canvas.clone());
+        
+        match RenderContext::new_from_canvas(canvas, self.width, self.height).await {
+            Ok(context) => {
+                self.render_context = Some(context);
+                Ok("WebGPU context initialized successfully".to_string())
+            },
+            Err(e) => Err(JsValue::from_str(&format!("Failed to initialize WebGPU context: {:?}", e)))
+        }
+    }
+
     #[wasm_bindgen]
     pub fn get_capabilities(&self) -> JsValue {
         let capabilities = js_sys::Object::new();
@@ -512,21 +596,20 @@ impl IMFDecoder {
         Ok(())
     }
 
-
     fn update_metrics(&mut self) {
-        let now = web_sys::window()
-            .and_then(|w| w.performance())
-            .map(|p| p.now())
-            .unwrap_or(0.0);
+        if let Some(window) = web_sys::window() {
+            if let Some(performance) = window.performance() {
+                let now = performance.now();
+                let frame_time = now - self.last_frame_time;
+                self.last_frame_time = now;
 
-        let frame_time = now - self.last_frame_time;
-        self.last_frame_time = now;
-
-        let fps = 1000.0 / frame_time;
-        info!("Frame {}: {:.2} FPS (frame time: {:.2}ms)", 
-            self.frame_count, fps, frame_time);
+                let fps = 1000.0 / frame_time;
+                info!("Frame {}: {:.2} FPS (frame time: {:.2}ms)", 
+                    self.frame_count, fps, frame_time);
+            }
+        }
     }
-
+    
     #[wasm_bindgen]
     pub fn stop_player_loop(&mut self) {
         if let Some(id) = self.animation_id.take() {
@@ -863,7 +946,7 @@ impl DecoderWorker {
 
 # decoder/queue.rs
 use std::collections::VecDeque;
-use web_sys::Performance;
+// use web_sys::Performance;
 use super::frame::Frame;
 
 #[derive(Debug, Default)]

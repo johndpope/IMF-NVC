@@ -1,0 +1,1797 @@
+// types/wasm.d.ts
+declare module '*.wasm' {
+  const content: WebAssembly.Module;
+  export default content;
+}
+
+
+
+// types/imf_decoder.d.ts
+declare module '@pkg/imf_decoder' {
+    export interface ReferenceFeature {
+        tensor: Float32Array;
+        shape: number[];
+    }
+
+    export interface ReferenceData {
+        features: ReferenceFeature[];
+        token: Float32Array;
+    }
+
+    export interface FrameToken {
+        token: Float32Array | number[];
+        frame_index: number;
+    }
+
+    export interface DecoderStatus {
+        initialized: boolean;
+        running: boolean;
+        metrics: {
+            frameCount: number;
+            lastFrameTime: number;
+        };
+        queue: {
+            inputQueueSize: number;
+            processingQueueSize: number;
+            outputQueueSize: number;
+        };
+    }
+
+    export interface DecoderCapabilities {
+        version: string;
+        dimensions: string;
+        features: string[];
+        methods: string[];
+    }
+
+    export class IMFDecoder {
+        constructor(width: number, height: number);
+        free(): void;
+        initialize_render_context(canvas: HTMLCanvasElement): Promise<string>;
+        get_capabilities(): DecoderCapabilities;
+        test(): string;
+        get_status(): DecoderStatus;
+        start_player_loop(): Promise<void>;
+        stop_player_loop(): void;
+        diagnostic_mode: boolean;
+        set_reference_data(data: ReferenceData): Promise<string>;
+        process_tokens(tokens: FrameToken[]): Promise<string>;
+        process_batch(): Promise<string>;
+        get_reference_status(): string;
+    }
+
+    export function initSync(): void;
+    export function start(): void;
+    export default function init(): Promise<void>;
+}
+
+// types/index.ts
+// js/types/index.ts
+import * as tf from '@tensorflow/tfjs';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
+// Enums
+export enum PlayerStatus {
+  Idle = 0,
+  Ready = 1,
+  Playing = 2,
+  Pause = 3,
+  Destroyed = 4
+}
+
+export enum DecoderStatus {
+  Idle = 0,
+  Initializing = 1,
+  Ready = 2,
+  Open = 3,
+  Pause = 4,
+  Closed = 5
+}
+
+
+
+// Configuration Interfaces
+export interface DecoderConfig {
+  width: number;
+  height: number;
+  maxQueueSize?: number;
+  batchSize?: number;
+  enablePerfMonitoring?: boolean;
+}
+
+// Data Structure Interfaces 
+export interface ReferenceFeature {
+  tensor: Float32Array;
+  shape: number[];
+}
+
+export interface ReferenceData {
+  features: ReferenceFeature[];
+  token: Float32Array;
+}
+
+export interface FrameToken {
+  token: Float32Array;
+  frame_index: number;
+}
+
+// WASM Related Interfaces
+export interface WasmModule {
+  IMFDecoder: new (width: number, height: number) => IMFDecoder;
+  default: () => Promise<void>;
+  [key: string]: any;
+}
+
+
+
+// Result Interfaces
+export interface VerifyResult {
+  success: boolean;
+  module?: WasmModule;
+  decoder?: IMFDecoder;
+  error?: Error;
+}
+
+export interface TestResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
+// Worker Message Interface
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
+  error?: string;
+}
+
+
+export enum MessageType {
+  DecoderInit = 'DecoderInit',
+  DecoderInited = 'DecoderInited',
+  ProcessFrame = 'ProcessFrame',
+  FrameProcessed = 'FrameProcessed',
+  UpdateRenderPass = 'UpdateRenderPass',
+  DecoderError = 'DecoderError',
+  DecoderRecovered = 'DecoderRecovered',
+  DecoderMetrics = 'DecoderMetrics',
+  DecoderCreated = 'DecoderCreated',
+  WasmLoaded = 'WasmLoaded',
+  DecoderReady = 'DecoderReady',
+  ReferenceDataSet = 'ReferenceDataSet',
+  TokensProcessed = 'TokensProcessed',
+  BatchProcessed = 'BatchProcessed',
+  Error = 'Error'
+}
+
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
+  error?: string;
+}
+
+export interface FrameStats {
+  frameTime: number;        // Time to process frame
+  gpuTime: number;         // GPU processing time
+  frameCount: number;      // Total frames processed
+  droppedFrames: number;   // Frames exceeding timing budget
+  lastFrameTimestamp: number;
+}
+
+export interface RenderPassConfig {
+  name: string;
+  format: GPUTextureFormat;
+  descriptors: {
+      colorAttachments: Array<{
+          clearValue: GPUColor;
+          loadOp: GPULoadOp;
+          storeOp: GPUStoreOp;
+      }>;
+  };
+}
+
+export interface TextureDescriptor {
+  id: number;
+  width: number;
+  height: number;
+  format: GPUTextureFormat;
+  usage: GPUTextureUsageFlags;
+}
+
+export interface ModelInputConfig {
+  inputShape: number[];
+  inputNormalization?: {
+      mean: number[];
+      std: number[];
+  };
+  outputDenormalization?: {
+      scale: number;
+      offset: number;
+  };
+  maxBatchSize: number;
+}
+
+export interface FrameData {
+  frameIndex: number;
+  timestamp: number;
+  data: tf.TensorBuffer<tf.Rank>;
+  metadata: {
+      inferenceTime: number;
+      inputShape: number[];
+      outputShape: number[];
+  };
+}
+
+
+// decoder/player.ts
+import * as tf from '@tensorflow/tfjs';
+import { 
+    PlayerStatus, 
+    MessageType, 
+    DecoderConfig,
+    WorkerMessage, 
+    ReferenceData,
+    FrameStats,
+    ModelInputConfig,
+    FrameData
+} from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<MessageType, Function>;
+    private config: DecoderConfig;
+    private frameBuffer: FrameData[] = [];
+    private frameIndex: number = 0;
+    private readonly bufferSize: number = 30;
+    private modelConfig: ModelInputConfig;
+    private lastProcessedFrame: tf.Tensor | null = null;
+    private frameCallback: ((stats: FrameStats) => void) | null = null;
+    private errorCallback: ((error: Error) => void) | null = null;
+    private lastFrameTime: number = 0;
+
+    constructor(config: DecoderConfig) {
+        this.config = config;
+        this.callbacks = new Map();
+        this.worker = new Worker(new URL('./decoder.worker.ts', import.meta.url));
+        this.modelConfig = {
+            inputShape: [1, config.height, config.width, 3],
+            inputNormalization: {
+                mean: [0.485, 0.456, 0.406],
+                std: [0.229, 0.224, 0.225]
+            },
+            maxBatchSize: 1
+        };
+        this.setupWorkerListeners();
+        this.initialize();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            if (error) {
+                this.handleDecoderError(error);
+                return;
+            }
+
+            switch (type) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                case MessageType.FrameProcessed:
+                    this.handleFrameProcessed(data);
+                    break;
+                case MessageType.DecoderRecovered:
+                    this.handleDecoderRecovery(data);
+                    break;
+            }
+        };
+
+        this.worker.onerror = (error) => {
+            this.handleDecoderError(error);
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ 
+                type: MessageType.DecoderInit,
+                data: this.config
+            });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+
+        const token = tf.zeros([1, 32]);
+
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    private async getNextFrameData(): Promise<FrameData> {
+        try {
+            if (this.lastProcessedFrame) {
+                this.lastProcessedFrame.dispose();
+                this.lastProcessedFrame = null;
+            }
+
+            const inputTensor = await this.prepareInputTensor();
+            const startTime = performance.now();
+            const outputTensor = await this.model!.executeAsync(inputTensor) as tf.Tensor;
+            const inferenceTime = performance.now() - startTime;
+            const processedData = await this.processModelOutput(outputTensor);
+            
+            inputTensor.dispose();
+            outputTensor.dispose();
+
+            this.frameIndex = (this.frameIndex + 1) % this.bufferSize;
+
+            return {
+                frameIndex: this.frameIndex,
+                timestamp: Date.now(),
+                data: processedData,
+                metadata: {
+                    inferenceTime,
+                    inputShape: this.modelConfig.inputShape,
+                    outputShape: processedData.shape
+                }
+            };
+        } catch (error) {
+            console.error('Error getting next frame:', error);
+            throw new Error(`Frame processing failed: ${error}`);
+        }
+    }
+
+    private async processFrame(): Promise<void> {
+        if (!this.model || this.status !== PlayerStatus.Playing) return;
+
+        try {
+            const frameData = await this.getNextFrameData();
+            this.worker.postMessage({
+                type: MessageType.ProcessFrame,
+                data: [{
+                    token: Array.from(frameData.data.values),
+                    frame_index: frameData.frameIndex
+                }]
+            });
+        } catch (error) {
+            this.handleDecoderError(error);
+        }
+    }
+
+    private handleFrameProcessed(data: any) {
+        if (this.frameCallback) {
+            this.frameCallback(data.frameStats);
+        }
+
+        if (this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private handleDecoderError(error: any) {
+        console.error('Decoder error:', error);
+        if (this.errorCallback) {
+            this.errorCallback(new Error(String(error)));
+        }
+    }
+
+    private handleDecoderRecovery(data: any) {
+        console.log('Decoder recovered:', data);
+        if (data.success && this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private requestNextFrame() {
+        const now = performance.now();
+        const timeSinceLastFrame = now - this.lastFrameTime;
+
+        if (timeSinceLastFrame >= 16.67) { // Target 60fps
+            this.processFrame();
+            this.lastFrameTime = now;
+        } else {
+            setTimeout(() => this.requestNextFrame(), 16.67 - timeSinceLastFrame);
+        }
+    }
+
+    public setModelConfig(config: Partial<ModelInputConfig>) {
+        this.modelConfig = {
+            ...this.modelConfig,
+            ...config
+        };
+    }
+
+    public getBufferStatus(): {current: number, total: number} {
+        return {
+            current: this.frameBuffer.length,
+            total: this.bufferSize
+        };
+    }
+
+    public onFrameProcessed(callback: (stats: FrameStats) => void) {
+        this.frameCallback = callback;
+    }
+
+    public onError(callback: (error: Error) => void) {
+        this.errorCallback = callback;
+    }
+
+    public async start() {
+        if (this.status !== PlayerStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+        await this.preloadFrames();
+        this.status = PlayerStatus.Playing;
+        this.requestNextFrame();
+    }
+
+    public stop() {
+        this.status = PlayerStatus.Ready;
+    }
+
+    public async destroy() {
+        this.stop();
+        await this.cleanupResources();
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+
+    // Additional helper methods
+    private async prepareInputTensor(): Promise<tf.Tensor> {
+        return tf.tidy(() => {
+            let inputTensor = tf.randomNormal(this.modelConfig.inputShape);
+            if (this.modelConfig.inputNormalization) {
+                const { mean, std } = this.modelConfig.inputNormalization;
+                inputTensor = tf.sub(inputTensor, mean);
+                inputTensor = tf.div(inputTensor, std);
+            }
+            if (inputTensor.shape[0] !== 1) {
+                inputTensor = tf.expandDims(inputTensor, 0);
+            }
+            this.lastProcessedFrame = inputTensor;
+            return inputTensor;
+        });
+    }
+
+    private async processModelOutput(outputTensor: tf.Tensor): Promise<tf.TensorBuffer<tf.Rank>> {
+        const outputData = await outputTensor.buffer();
+        await this.applyPostProcessing(outputData);
+        return outputData;
+    }
+
+    private async applyPostProcessing(data: tf.TensorBuffer<tf.Rank>): Promise<void> {
+        tf.tidy(() => {
+            if (this.modelConfig.outputDenormalization) {
+                const { scale, offset } = this.modelConfig.outputDenormalization;
+                for (let i = 0; i < data.size; i++) {
+                    const value = data.values[i];
+                    data.values[i] = value * scale + offset;
+                }
+            }
+            for (let i = 0; i < data.size; i++) {
+                data.values[i] = Math.max(0, Math.min(1, data.values[i]));
+            }
+        });
+    }
+
+    private async cleanupResources(): Promise<void> {
+        await this.clearBuffer();
+        if (this.lastProcessedFrame) {
+            this.lastProcessedFrame.dispose();
+            this.lastProcessedFrame = null;
+        }
+        tf.engine().startScope();
+        tf.engine().endScope();
+    }
+
+    public async preloadFrames(count: number = this.bufferSize): Promise<void> {
+        for (let i = 0; i < count; i++) {
+            try {
+                const frameData = await this.getNextFrameData();
+                this.frameBuffer.push(frameData);
+            } catch (error) {
+                console.error(`Failed to preload frame ${i}:`, error);
+                break;
+            }
+        }
+    }
+
+    public async clearBuffer(): Promise<void> {
+        this.frameBuffer.forEach(frame => {
+            if (frame.data instanceof tf.Tensor) {
+                frame.data.dispose();
+            }
+        });
+        this.frameBuffer = [];
+        this.frameIndex = 0;
+    }
+}
+
+// decoder/decoder.ts
+import * as tf from '@tensorflow/tfjs';
+import { PlayerStatus, MessageType, ReferenceData } from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<string, Function> = new Map();
+
+    constructor(width: number, height: number) {
+        this.worker = new Worker(new URL('./decoder.worker', import.meta.url));
+        this.setupWorkerListeners();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            switch (type as MessageType) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                case MessageType.Error:
+                    console.error('Decoder error:', error);
+                    break;
+            }
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ type: MessageType.DecoderInit });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve, reject) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+        const token = tf.zeros([1, 32]);
+
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    async processFrame(inputData: Float32Array, inputShape: number[]): Promise<void> {
+        if (!this.model) return;
+
+        try {
+            const inputTensor = tf.tensor(inputData, inputShape);
+            const outputTensor = await this.model.executeAsync(inputTensor);
+            const outputData = await (outputTensor as tf.Tensor).data();
+
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.TokensProcessed, resolve);
+                
+                this.worker.postMessage({
+                    type: MessageType.TokensProcessed,
+                    data: [{
+                        token: Array.from(outputData),
+                        frame_index: 0
+                    }]
+                });
+            });
+        } catch (error) {
+            console.error('Error processing frame:', error);
+        }
+    }
+
+    destroy() {
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+}
+
+
+// decoder/worker.ts
+// js/decoder/worker.ts
+import init, { IMFDecoder } from '../../pkg/imf_decoder';
+import { MessageType, DecoderStatus } from '../types';
+
+class DecoderWorkerInstance {
+    private decoder: IMFDecoder | null = null;
+    private status: DecoderStatus = DecoderStatus.Idle;
+
+    async initialize() {
+        try {
+            await init();
+            this.decoder = new IMFDecoder(1920, 1080);
+            this.status = DecoderStatus.Ready;
+            self.postMessage({ type: MessageType.DecoderCreated });
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    handleMessage(event: MessageEvent) {
+        const { type, data } = event.data;
+
+        try {
+            switch (type as MessageType) {
+                case MessageType.DecoderInit:
+                    this.initialize();
+                    break;
+                case MessageType.TokensProcessed:
+                    this.processTokens(data);
+                    break;
+            }
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    async processTokens(tokens: any) {
+        if (!this.decoder || this.status !== DecoderStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+
+        const result = await this.decoder.process_tokens(tokens);
+        self.postMessage({ type: MessageType.TokensProcessed, result });
+
+        const batchResult = await this.decoder.process_batch();
+        self.postMessage({ type: MessageType.BatchProcessed, result: batchResult });
+    }
+}
+
+const worker = new DecoderWorkerInstance();
+self.onmessage = (event) => worker.handleMessage(event);
+
+// utils/wasm-test.ts
+import init   from '@pkg/imf_decoder';
+import {IMFDecoder}   from '@pkg/imf_decoder';
+import type { VerifyResult, TestResult } from '../types';
+
+async function verifyWasmBuild(): Promise<VerifyResult> {
+    console.log('🔍 Starting WASM verification...');
+    
+    try {
+        await init();
+        const exports = Object.keys(await import('@pkg/imf_decoder'));
+        console.log('📦 WASM Exports:', exports);
+
+        const width = 640;
+        const height = 480;
+        console.log(`Creating new IMF decoder with dimensions ${width}x${height}`);
+        
+        const decoder = new IMFDecoder(width, height);
+        const methods = Object.getOwnPropertyNames(IMFDecoder.prototype);
+        console.log('🔧 IMFDecoder Methods:', methods);
+
+        const testResult = decoder.test();
+        console.log('🧪 Test method output:', testResult);
+        console.log('IMFDecoder instance:', decoder);
+
+        if (!testResult.includes('IMFDecoder working!')) {
+            throw new Error('Decoder test failed');
+        }
+
+        console.log('✅ WASM verification successful!');
+        return {
+            success: true,
+            decoder
+        };
+    } catch (error) {
+        console.error('❌ WASM verification failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error : new Error('Unknown error')
+        };
+    }
+}
+
+ async function runDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+  try {
+      console.log('Available methods:', Object.getOwnPropertyNames(IMFDecoder.prototype));
+      
+      // Test 1: Basic functionality
+      const initialTest = decoder.test();
+      console.log('Initial test:', initialTest);
+
+      // Test 2: Set diagnostic mode
+      console.log('Setting diagnostic mode...');
+      decoder.diagnostic_mode = true;
+      console.log('Diagnostic mode set to:', decoder.diagnostic_mode);
+      
+      if (!decoder.diagnostic_mode) {
+          throw new Error('Failed to set diagnostic mode');
+      }
+      console.log('Diagnostic mode is now:', decoder.diagnostic_mode);
+
+      // Test 3: Set reference data
+      console.log('Setting reference data...');
+      const referenceData = {
+          features: [
+              {
+                  tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                  shape: [1, 128, 64, 64]
+              },
+              {
+                  tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                  shape: [1, 256, 32, 32]
+              },
+              {
+                  tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                  shape: [1, 512, 16, 16]
+              },
+              {
+                  tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                  shape: [1, 512, 8, 8]
+              }
+          ],
+          token: new Float32Array(32).fill(0.1)
+      };
+
+      const refResult = await decoder.set_reference_data(referenceData);
+      console.log('Set reference data result:', refResult);
+
+      // Test 4: Process test frame
+      console.log('Processing tokens...');
+      const frameWidth = 640;
+      const frameHeight = 480;
+      const channelCount = 4; // RGBA
+      const frameData = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+
+      if (typeof decoder.process_tokens !== 'function') {
+          throw new Error('process_tokens method not found on decoder');
+      }
+      console.log('process_tokens exists:', typeof decoder.process_tokens);
+
+      const tokenResult = await decoder.process_tokens([{
+          token: frameData,
+          frame_index: 0
+      }]);
+
+      // Test 5: Process batch
+      const batchResult = await decoder.process_batch();
+
+      return {
+          success: true,
+          message: 'All decoder tests completed successfully'
+      };
+
+  } catch (error) {
+      console.error('Error processing tokens:', error);
+      console.error('Stack:', error);
+      console.error('Test sequence failed:', error);
+      return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error)
+      };
+  }
+}
+
+async function initializeDecoder(): Promise<void> {
+  try {
+      console.log('🔍 Starting WASM verification...');
+      const { success, module: wasm_module, decoder, error } = await verifyWasmBuild();
+      
+      if (!success || !decoder) {
+          console.error('Failed to initialize decoder:', error);
+          if (error?.stack) console.error('Stack:', error.stack);
+          return;
+      }
+
+      console.log('IMFDecoder instance:', decoder);
+      console.log('✅ WASM verification successful!');
+      
+      // Store for later use
+      (window as any).decoder = decoder;
+      (window as any).wasm = wasm_module;
+      
+      // Run decoder tests
+      await runDecoderTests(decoder);
+      
+      console.log('IMFDecoder initialized successfully');
+  } catch (e) {
+      console.error('Failed to initialize decoder:', e);
+      if (e instanceof Error) console.error('Stack:', e.stack);
+      
+      try {
+          // Additional debugging info
+          const wasm_module = await import('@pkg/imf_decoder');
+      
+          // Wait for module initialization
+          await init();
+          
+          // Log all available exports
+          console.log('📦 WASM Exports:', Object.keys(wasm_module));
+      } catch (importError) {
+          console.error('Failed to import WASM module:', importError);
+      }
+  }
+}
+
+
+
+async function testAnimationFrame(decoder: IMFDecoder): Promise<TestResult> {
+    console.log('🎬 Starting animation frame test...');
+    
+    try {
+        // Track frame count and timing
+        let frameCount = 0;
+        let startTime = performance.now();
+        let lastFrameTime = startTime;
+        const testDuration = 3000; // Run test for 3 seconds
+        const targetFPS = 60;
+        const frameTimings: number[] = [];
+
+        // Create test data
+        const referenceData = {
+            features: [
+                {
+                    tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                    shape: [1, 128, 64, 64]
+                },
+                {
+                    tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                    shape: [1, 256, 32, 32]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                    shape: [1, 512, 16, 16]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                    shape: [1, 512, 8, 8]
+                }
+            ],
+            token: new Float32Array(32).fill(0.1)
+        };
+
+        // Set up decoder
+        console.log('Setting reference data...');
+        await decoder.set_reference_data(referenceData);
+        decoder.diagnostic_mode = true;
+
+        // Create a promise that resolves when the animation test is complete
+        const animationTest = new Promise<void>((resolve) => {
+            function animationFrame(timestamp: number) {
+                const currentTime = performance.now();
+                const elapsed = currentTime - startTime;
+                const frameDuration = currentTime - lastFrameTime;
+                
+                // Process frame
+                const frameData = new Float32Array(640 * 480 * 4).fill(0.5);
+                decoder.process_tokens([{
+                    token: Array.from(frameData),
+                    frame_index: frameCount
+                }]);
+                
+                // Track metrics
+                frameCount++;
+                frameTimings.push(frameDuration);
+                lastFrameTime = currentTime;
+
+                // Continue animation if test duration hasn't elapsed
+                if (elapsed < testDuration) {
+                    requestAnimationFrame(animationFrame);
+                } else {
+                    resolve();
+                }
+            }
+
+            // Start animation loop
+            requestAnimationFrame(animationFrame);
+        });
+
+        // Wait for animation test to complete
+        await animationTest;
+
+        // Calculate test results
+        const averageFrameTime = frameTimings.reduce((a, b) => a + b, 0) / frameTimings.length;
+        const measuredFPS = 1000 / averageFrameTime;
+        const minFrameTime = Math.min(...frameTimings);
+        const maxFrameTime = Math.max(...frameTimings);
+        const frameTimeJitter = maxFrameTime - minFrameTime;
+
+        // Log results
+        console.log('🎥 Animation test completed:');
+        console.log(`Frames processed: ${frameCount}`);
+        console.log(`Average frame time: ${averageFrameTime.toFixed(2)}ms`);
+        console.log(`Measured FPS: ${measuredFPS.toFixed(2)}`);
+        console.log(`Frame time range: ${minFrameTime.toFixed(2)}ms - ${maxFrameTime.toFixed(2)}ms`);
+        console.log(`Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`);
+
+        // Verify test results
+        const performanceThreshold = 0.8; // 80% of target performance
+        const targetFrameTime = 1000 / targetFPS;
+        const isPerformant = averageFrameTime <= targetFrameTime / performanceThreshold;
+        const isStable = frameTimeJitter < targetFrameTime;
+
+        if (!isPerformant || !isStable) {
+            throw new Error(
+                `Performance targets not met:\n` +
+                `Average frame time: ${averageFrameTime.toFixed(2)}ms (target: ${targetFrameTime}ms)\n` +
+                `Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`
+            );
+        }
+
+        return {
+            success: true,
+            message: `Animation test completed successfully:\n` +
+                    `Processed ${frameCount} frames at ${measuredFPS.toFixed(1)} FPS\n` +
+                    `Frame time: ${averageFrameTime.toFixed(1)}ms ±${(frameTimeJitter/2).toFixed(1)}ms`
+        };
+
+    } catch (error) {
+        console.error('❌ Animation test failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+// Update the main test function to include animation testing
+async function runEnhancedDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+    try {
+        // Run existing decoder tests first
+        const basicTests = await runDecoderTests(decoder);
+        if (!basicTests.success) {
+            throw new Error(`Basic decoder tests failed: ${basicTests.error}`);
+        }
+
+        // Run animation frame test
+        console.log('Running animation frame test...');
+        const animationTest = await testAnimationFrame(decoder);
+        if (!animationTest.success) {
+            throw new Error(`Animation test failed: ${animationTest.error}`);
+        }
+
+        return {
+            success: true,
+            message: `All tests completed successfully.\n${animationTest.message}`
+        };
+
+    } catch (error) {
+        console.error('Test sequence failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+
+// Initialize when page loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializeDecoder);
+} else {
+  initializeDecoder();
+}
+
+export { initializeDecoder, verifyWasmBuild, runDecoderTests, runEnhancedDecoderTests, testAnimationFrame };
+
+// utils/performance-monitor.ts
+// js/utils/performance-monitor.ts
+import * as tf from '@tensorflow/tfjs';
+
+export class PerformanceMonitor {
+    private metrics: {
+        fps: number[];
+        inferenceTime: number[];
+        memoryUsage: number[];
+        tensorCount: number[];
+    } = {
+        fps: [],
+        inferenceTime: [],
+        memoryUsage: [],
+        tensorCount: []
+    };
+
+    private readonly maxSamples: number = 60; // 1 second at 60fps
+    private lastFrameTime: number = 0;
+
+    public recordMetrics(inferenceTime: number): void {
+        const now = performance.now();
+        
+        // Calculate FPS
+        if (this.lastFrameTime > 0) {
+            const fps = 1000 / (now - this.lastFrameTime);
+            this.pushMetric('fps', fps);
+        }
+        this.lastFrameTime = now;
+
+        // Record inference time
+        this.pushMetric('inferenceTime', inferenceTime);
+
+        // Record memory usage
+        this.recordMemoryUsage();
+    }
+
+    private recordMemoryUsage(): void {
+        const memoryInfo = tf.memory();
+        this.pushMetric('memoryUsage', memoryInfo.numBytes);
+        this.pushMetric('tensorCount', memoryInfo.numTensors);
+    }
+
+    private pushMetric(key: keyof typeof this.metrics, value: number): void {
+        this.metrics[key].push(value);
+        if (this.metrics[key].length > this.maxSamples) {
+            this.metrics[key].shift();
+        }
+    }
+
+    public getAverageMetrics(): {[key: string]: number} {
+        const result: {[key: string]: number} = {};
+        
+        for (const [key, values] of Object.entries(this.metrics)) {
+            if (values.length > 0) {
+                const sum = values.reduce((a, b) => a + b, 0);
+                result[key] = sum / values.length;
+            }
+        }
+
+        return result;
+    }
+
+    public getMetricsReport(): string {
+        const averages = this.getAverageMetrics();
+        return `
+Performance Report:
+------------------
+FPS: ${averages.fps.toFixed(2)}
+Inference Time: ${averages.inferenceTime.toFixed(2)}ms
+Memory Usage: ${(averages.memoryUsage / 1024 / 1024).toFixed(2)}MB
+Active Tensors: ${averages.tensorCount}
+        `.trim();
+    }
+
+    public reset(): void {
+        Object.keys(this.metrics).forEach(key => {
+            this.metrics[key as keyof typeof this.metrics] = [];
+        });
+        this.lastFrameTime = 0;
+    }
+}
+
+// index.ts
+import { init, verifyWasmBuild, runDecoderTests } from './utils/wasm-test';
+import { 
+    WasmModule,  
+    ReferenceData, 
+    FrameToken, 
+    VerifyResult,
+    TestResult,
+    PlayerStatus,
+    DecoderStatus 
+} from './types';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
+
+class TestUI {
+    private decoder: IMFDecoder | null = null;
+    private playerStatus: PlayerStatus = PlayerStatus.Idle;
+    private decoderStatus: DecoderStatus = DecoderStatus.Idle;
+    private animationFrameId: number | null = null;
+    private frameCount: number = 0;
+    private canvas: HTMLCanvasElement | null = null;
+
+    private buttons!: {
+        verify: HTMLButtonElement;
+        init: HTMLButtonElement;
+        start: HTMLButtonElement;
+        process: HTMLButtonElement;
+        pause: HTMLButtonElement;
+        clear: HTMLButtonElement;
+    };
+
+    private statusElements!: {
+        player: HTMLElement;
+        decoder: HTMLElement;
+    };
+
+    constructor() {
+        this.setupLayout();
+        this.initializeElements();
+        this.setupEventListeners();
+        this.interceptConsole();
+        this.setupCanvas();
+    }
+
+    private setupLayout() {
+        document.body.innerHTML = `
+            <div class="container">
+                <div class="left-panel">
+                    <h1>IMF Decoder Test</h1>
+                    <div class="status-panel">
+                        <div class="status-item">
+                            <span class="status-label">Player Status:</span>
+                            <span id="player-status" class="status-value status-idle">Idle</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Decoder Status:</span>
+                            <span id="decoder-status" class="status-value status-idle">Idle</span>
+                        </div>
+                    </div>
+                    <canvas id="decoder-canvas"></canvas>
+                    <div class="button-group">
+                        <button id="verifyWasm">Verify WASM</button>
+                        <button id="initDecoder" disabled>Initialize Decoder</button>
+                        <button id="startDecoder" disabled>Start Decoder</button>
+                        <button id="processFrame" disabled>Process Frame</button>
+                        <button id="pauseDecoder" disabled>Pause Decoder</button>
+                        <button id="clearLog">Clear Log</button>
+                    </div>
+                </div>
+                <div class="right-panel">
+                    <div class="log-header">
+                        <h2>Decoder Log</h2>
+                    </div>
+                    <div id="log" class="log-content"></div>
+                </div>
+            </div>
+        `;
+
+        const style = document.createElement('style');
+        style.textContent = `
+            .container {
+                display: flex;
+                gap: 20px;
+                padding: 20px;
+                max-width: 1400px;
+                margin: 0 auto;
+                height: calc(100vh - 40px);
+            }
+
+            .left-panel {
+                flex: 1;
+                min-width: 400px;
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+
+            .right-panel {
+                flex: 1;
+                min-width: 400px;
+                display: flex;
+                flex-direction: column;
+                border-left: 1px solid #ccc;
+                padding-left: 20px;
+            }
+
+            .status-panel {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+
+            .status-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+
+            .status-label {
+                font-weight: bold;
+            }
+
+            .status-value {
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 14px;
+            }
+
+            .status-idle { background: #ffd700; }
+            .status-ready { background: #90ee90; }
+            .status-playing { background: #87ceeb; }
+            .status-paused { background: #ffb6c1; }
+
+            #decoder-canvas {
+                width: 100%;
+                max-width: 640px;
+                height: auto;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                margin: 0 auto;
+            }
+
+            .button-group {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 10px;
+            }
+
+            button {
+                padding: 10px;
+                border: none;
+                border-radius: 4px;
+                background: #4285f4;
+                color: white;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+
+            button:hover:not(:disabled) {
+                background: #3367d6;
+            }
+
+            button:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+            }
+
+            .log-header {
+                padding: 10px 0;
+                border-bottom: 1px solid #eee;
+                margin-bottom: 10px;
+            }
+
+            .log-content {
+                flex: 1;
+                overflow-y: auto;
+                background: #f8f9fa;
+                padding: 10px;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+
+            .info { color: #4285f4; }
+            .error { color: #dc3545; }
+            .success { color: #28a745; }
+
+            h1, h2 {
+                margin: 0 0 20px 0;
+                color: #333;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Setup canvas after layout
+        this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
+        if (this.canvas) {
+            this.canvas.width = 640;
+            this.canvas.height = 480;
+        }
+    }
+
+    private async checkWebGPUSupport(): Promise<boolean> {
+        if (!navigator.gpu) {
+            this.log('error', 'WebGPU is not supported in this browser');
+            return false;
+        }
+
+        try {
+            const adapter = await navigator.gpu.requestAdapter({
+                powerPreference: 'high-performance'
+            });
+
+            if (!adapter) {
+                this.log('error', 'No WebGPU adapter found');
+                return false;
+            }
+
+            const device = await adapter.requestDevice();
+            if (!device) {
+                this.log('error', 'Failed to get WebGPU device');
+                return false;
+            }
+
+            this.log('success', 'WebGPU is supported and initialized');
+            return true;
+        } catch (error) {
+            this.log('error', `WebGPU initialization failed: ${error}`);
+            return false;
+        }
+    }
+    
+    private setupCanvas() {
+        // Create and configure canvas for WebGPU
+        this.canvas = document.createElement('canvas');
+        this.canvas.width = 640;
+        this.canvas.height = 480;
+        this.canvas.style.border = '1px solid #ccc';
+        
+        // Insert canvas after the status panel
+        const statusPanel = document.querySelector('.status-panel');
+        if (statusPanel && statusPanel.parentNode) {
+            statusPanel.parentNode.insertBefore(this.canvas, statusPanel.nextSibling);
+        }
+
+        // Add canvas style
+        const style = document.createElement('style');
+        style.textContent = `
+            canvas {
+                display: block;
+                margin: 20px auto;
+                max-width: 100%;
+                height: auto;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+    
+
+
+    private initializeElements() {
+        // Verify all elements exist before assignment
+        const verifyBtn = document.getElementById('verifyWasm');
+        const initBtn = document.getElementById('initDecoder');
+        const startBtn = document.getElementById('startDecoder');
+        const processBtn = document.getElementById('processFrame');
+        const pauseBtn = document.getElementById('pauseDecoder');
+        const clearBtn = document.getElementById('clearLog');
+        const playerStatus = document.getElementById('player-status');
+        const decoderStatus = document.getElementById('decoder-status');
+
+        if (!verifyBtn || !initBtn || !startBtn || !processBtn || 
+            !pauseBtn || !clearBtn || !playerStatus || !decoderStatus) {
+            throw new Error('Required DOM elements not found');
+        }
+
+        this.buttons = {
+            verify: verifyBtn as HTMLButtonElement,
+            init: initBtn as HTMLButtonElement,
+            start: startBtn as HTMLButtonElement,
+            process: processBtn as HTMLButtonElement,
+            pause: pauseBtn as HTMLButtonElement,
+            clear: clearBtn as HTMLButtonElement
+        };
+
+        this.statusElements = {
+            player: playerStatus,
+            decoder: decoderStatus
+        };
+    }
+
+    private interceptConsole() {
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+
+        console.log = (...args: any[]) => {
+            this.log('info', ...args);
+            originalLog.apply(console, args);
+        };
+
+        console.error = (...args: any[]) => {
+            this.log('error', ...args);
+            originalError.apply(console, args);
+        };
+
+        console.warn = (...args: any[]) => {
+            this.log('info', ...args);
+            originalWarn.apply(console, args);
+        };
+    }
+
+
+
+    private setupEventListeners() {
+        this.buttons.verify.onclick = () => this.verifyWasm();
+        this.buttons.init.onclick = () => this.initializeDecoder();
+        this.buttons.start.onclick = () => this.startDecoder();
+        this.buttons.process.onclick = () => this.processFrame();
+        this.buttons.pause.onclick = () => this.pauseDecoder();
+        this.buttons.clear.onclick = () => this.clearLog();
+    }
+
+    private updateStatus(type: 'player' | 'decoder', status: PlayerStatus | DecoderStatus) {
+        const element = this.statusElements[type];
+        const statusMap = type === 'player' ? PlayerStatus : DecoderStatus;
+        const statusName = statusMap[status];
+        
+        // Remove all existing status classes
+        element.className = 'status-value';
+        
+        // Add appropriate status class
+        switch(status) {
+            case 0: element.classList.add('status-idle'); break;
+            case 1: element.classList.add('status-ready'); break;
+            case 2: element.classList.add('status-playing'); break;
+            case 3: element.classList.add('status-paused'); break;
+            default: element.classList.add('status-error');
+        }
+        
+        element.textContent = statusName;
+    }
+
+    private async verifyWasm() {
+        try {
+            this.buttons.verify.disabled = true;
+            this.log('info', 'Verifying WASM...');
+            
+            const result = await verifyWasmBuild();
+            if (result.success && result.decoder) {
+                this.decoder = result.decoder;
+                this.buttons.init.disabled = false;
+                this.updateStatus('player', PlayerStatus.Ready);
+                this.log('success', 'WASM verification successful!');
+            } else {
+                this.updateStatus('player', PlayerStatus.Idle);
+                this.log('error', 'WASM verification failed!');
+            }
+        } catch (error) {
+            this.log('error', `Error: ${error.message}`);
+            this.updateStatus('player', PlayerStatus.Idle);
+        } finally {
+            this.buttons.verify.disabled = false;
+        }
+    }
+    
+    
+    private async initializeDecoder() {
+        try {
+            this.buttons.init.disabled = true;
+            this.updateStatus('decoder', DecoderStatus.Initializing);
+            
+            if (!this.decoder || !this.canvas) {
+                throw new Error('Decoder or canvas not initialized');
+            }
+
+            // Check WebGPU support first
+            const hasWebGPU = await this.checkWebGPUSupport();
+            if (!hasWebGPU) {
+                throw new Error('WebGPU not supported or failed to initialize');
+            }
+
+            // Configure canvas for WebGPU
+            this.canvas.width = 640;
+            this.canvas.height = 480;
+            
+            // Create and set reference data
+            const referenceData = this.createReferenceData();
+            const refResult = await this.decoder.set_reference_data(referenceData);
+            this.log('info', `Reference data set: ${refResult}`);
+
+            // Initialize WebGPU context with proper error handling
+            try {
+                const initResult = await this.decoder.initialize_render_context(this.canvas);
+                this.log('info', `Render context initialized: ${initResult}`);
+            } catch (error) {
+                throw new Error(`WebGPU context initialization failed: ${error}`);
+            }
+
+            // Check decoder status
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Decoder initialization incomplete');
+            }
+
+            this.buttons.start.disabled = false;
+            this.updateStatus('decoder', DecoderStatus.Ready);
+            this.log('success', 'Decoder initialized successfully');
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Initialization error: ${errorMessage}`);
+            this.updateStatus('decoder', DecoderStatus.Idle);
+        } finally {
+            this.buttons.init.disabled = false;
+        }
+    }
+
+    private async processFrame() {
+        if (!this.decoder) return;
+
+        try {
+            const frameWidth = 640;
+            const frameHeight = 480;
+            const channelCount = 4; // RGBA
+            const frameData = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+            
+            const token: FrameToken = {
+                token: frameData,
+                frame_index: this.frameCount++
+            };
+
+            this.log('info', `Processing frame ${token.frame_index}`);
+            const processResult = await this.decoder.process_tokens([token]);
+            this.log('info', processResult);
+            
+            const batchResult = await this.decoder.process_batch();
+            this.log('success', `Batch processed: ${batchResult}`);
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Process error: ${errorMessage}`);
+        }
+    }
+
+    private async startDecoderLoop() {
+        if (!this.decoder || !this.canvas) return;
+
+        try {
+            // Verify render context is initialized
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
+            }
+
+            await this.decoder.start_player_loop();
+            this.updateStatus('decoder', DecoderStatus.Playing);
+            this.log('success', 'Decoder loop started');
+
+            // Start frame processing
+            this.processFrame();
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Start error: ${errorMessage}`);
+            this.updateStatus('decoder', DecoderStatus.Ready);
+        }
+    }
+    
+    private async startDecoder() {
+        try {
+            this.buttons.start.disabled = true;
+            this.updateStatus('decoder', DecoderStatus.Open);
+            
+            if (!this.decoder) {
+                throw new Error('Decoder not initialized');
+            }
+    
+            // Make sure render context is ready before starting the loop
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
+            }
+    
+            // Start the decoder's internal render loop
+            await this.decoder.start_player_loop();
+            
+            // Enable frame processing and pause buttons
+            this.buttons.process.disabled = false;
+            this.buttons.pause.disabled = false;
+            
+            // Start our animation loop
+            this.startDecoderLoop();
+            
+            this.log('success', 'Decoder started');
+        } catch (error:any) {
+            this.log('error', `Start error: ${error.message}`);
+            this.updateStatus('decoder', DecoderStatus.Ready);
+        }
+    }
+
+    // private async startDecoderLoop() {
+    //     if (!this.decoder || !this.canvas) return;
+
+    //     const frameWidth = 640;
+    //     const frameHeight = 480;
+    //     const channelCount = 4; // RGBA
+        
+    //     const animate = async () => {
+    //         try {
+    //             // Create test frame data with changing pattern
+    //             const frame = new Float32Array(frameWidth * frameHeight * channelCount);
+                
+    //             // Create a simple animation pattern
+    //             const time = this.frameCount * 0.05;
+    //             for (let y = 0; y < frameHeight; y++) {
+    //                 for (let x = 0; x < frameWidth; x++) {
+    //                     const i = (y * frameWidth + x) * channelCount;
+    //                     // Create animated gradient pattern
+    //                     frame[i] = (Math.sin(x * 0.01 + time) + 1) * 0.5; // R
+    //                     frame[i + 1] = (Math.cos(y * 0.01 + time) + 1) * 0.5; // G
+    //                     frame[i + 2] = (Math.sin((x + y) * 0.01 + time) + 1) * 0.5; // B
+    //                     frame[i + 3] = 1.0; // A
+    //                 }
+    //             }
+
+    //             const token: FrameToken = {
+    //                 token: frame,
+    //                 frame_index: this.frameCount++
+    //             };
+
+    //             // Process frame through decoder
+    //             await this.decoder.process_tokens([token]);
+    //             await this.decoder.process_batch();
+
+    //             // Request next frame if still playing
+    //             if (this.decoderStatus === DecoderStatus.Open) {
+    //                 this.animationFrameId = requestAnimationFrame(animate);
+    //             }
+
+    //             // Log frame stats every 60 frames
+    //             if (this.frameCount % 60 === 0) {
+    //                 const stats = await this.decoder.get_status();
+    //                 this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(stats)}`);
+    //             }
+
+    //         } catch (error) {
+    //             this.log('error', `Animation error: ${error}`);
+    //             this.pauseDecoder();
+    //         }
+    //     };
+
+    //     // Start animation loop
+    //     this.animationFrameId = requestAnimationFrame(animate);
+    // }
+
+    // private async startDecoder() {
+    //     try {
+    //         this.buttons.start.disabled = true;
+    //         this.updateStatus('decoder', DecoderStatus.Open);
+            
+    //         if (!this.decoder) {
+    //             throw new Error('Decoder not initialized');
+    //         }
+
+    //         // Enable frame processing and pause buttons
+    //         this.buttons.process.disabled = false;
+    //         this.buttons.pause.disabled = false;
+            
+    //         // Start the decoder's internal render loop
+    //         await this.decoder.start_player_loop();
+            
+    //         // Start our animation loop
+    //         this.startDecoderLoop();
+            
+    //         this.log('success', 'Decoder started');
+    //     } catch (error:any) {
+    //         this.log('error', `Start error: ${error.message}`);
+    //         this.updateStatus('decoder', DecoderStatus.Ready);
+    //     }
+    // }
+
+    private async pauseDecoder() {
+        try {
+            this.updateStatus('decoder', DecoderStatus.Pause);
+            
+            // Stop animation loop
+            if (this.animationFrameId !== null) {
+                cancelAnimationFrame(this.animationFrameId);
+                this.animationFrameId = null;
+            }
+
+            // Stop decoder's internal render loop
+            if (this.decoder) {
+                this.decoder.stop_player_loop();
+            }
+
+            this.buttons.process.disabled = true;
+            this.buttons.pause.disabled = true;
+            this.buttons.start.disabled = false;
+            
+            this.log('info', 'Decoder paused');
+        } catch (error) {
+            this.log('error', `Pause error: ${error.message}`);
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        return {
+            features: [
+                {
+                    tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                    shape: [1, 128, 64, 64]
+                },
+                {
+                    tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                    shape: [1, 256, 32, 32]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                    shape: [1, 512, 16, 16]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                    shape: [1, 512, 8, 8]
+                }
+            ],
+            token: new Float32Array(32).fill(0.1)
+        };
+    }
+
+    private log(type: 'info' | 'error' | 'success', ...args: any[]) {
+        const logDiv = document.getElementById('log')!;
+        const line = document.createElement('div');
+        line.className = type;
+        line.textContent = args.map(arg => 
+            typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+        ).join(' ');
+        logDiv.appendChild(line);
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    private clearLog() {
+        const logDiv = document.getElementById('log')!;
+        logDiv.innerHTML = '';
+    }
+}
+
+// Initialize when document is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => new TestUI());
+} else {
+    new TestUI();
+}
+
+export { TestUI };
+

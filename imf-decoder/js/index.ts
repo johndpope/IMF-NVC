@@ -201,6 +201,36 @@ class TestUI {
             this.canvas.height = 480;
         }
     }
+
+    private async checkWebGPUSupport(): Promise<boolean> {
+        if (!navigator.gpu) {
+            this.log('error', 'WebGPU is not supported in this browser');
+            return false;
+        }
+
+        try {
+            const adapter = await navigator.gpu.requestAdapter({
+                powerPreference: 'high-performance'
+            });
+
+            if (!adapter) {
+                this.log('error', 'No WebGPU adapter found');
+                return false;
+            }
+
+            const device = await adapter.requestDevice();
+            if (!device) {
+                this.log('error', 'Failed to get WebGPU device');
+                return false;
+            }
+
+            this.log('success', 'WebGPU is supported and initialized');
+            return true;
+        } catch (error) {
+            this.log('error', `WebGPU initialization failed: ${error}`);
+            return false;
+        }
+    }
     
     private setupCanvas() {
         // Create and configure canvas for WebGPU
@@ -346,24 +376,33 @@ class TestUI {
                 throw new Error('Decoder or canvas not initialized');
             }
 
-            // Check for WebGPU support
-            if (!navigator.gpu) {
-                throw new Error('WebGPU not supported');
+            // Check WebGPU support first
+            const hasWebGPU = await this.checkWebGPUSupport();
+            if (!hasWebGPU) {
+                throw new Error('WebGPU not supported or failed to initialize');
             }
 
-            // Create and set reference data first
-            const referenceData: ReferenceData = this.createReferenceData();
+            // Configure canvas for WebGPU
+            this.canvas.width = 640;
+            this.canvas.height = 480;
+            
+            // Create and set reference data
+            const referenceData = this.createReferenceData();
             const refResult = await this.decoder.set_reference_data(referenceData);
             this.log('info', `Reference data set: ${refResult}`);
 
-            // Initialize WebGPU context
-            const initResult = await this.decoder.initialize_render_context(this.canvas);
-            this.log('info', `Render context initialized: ${initResult}`);
+            // Initialize WebGPU context with proper error handling
+            try {
+                const initResult = await this.decoder.initialize_render_context(this.canvas);
+                this.log('info', `Render context initialized: ${initResult}`);
+            } catch (error) {
+                throw new Error(`WebGPU context initialization failed: ${error}`);
+            }
 
-            // Verify status
+            // Check decoder status
             const status = await this.decoder.get_status();
             if (!status.initialized) {
-                throw new Error('Failed to initialize render context');
+                throw new Error('Decoder initialization incomplete');
             }
 
             this.buttons.start.disabled = false;
@@ -565,33 +604,6 @@ class TestUI {
             this.log('error', `Pause error: ${error.message}`);
         }
     }
-
-    private async processFrame() {
-        if (!this.decoder) return;
-
-        try {
-            // Create test frame data - full frame size (640x480 RGBA)
-            const frameWidth = 640;
-            const frameHeight = 480;
-            const channelCount = 4; // RGBA
-            const frame = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
-            
-            const token: FrameToken = {
-                token: frame,
-                frame_index: 0
-            };
-
-            this.log('info', `Processing frame with size: ${frameWidth}x${frameHeight}`);
-            await this.decoder.process_tokens([token]);
-            const batchResult = await this.decoder.process_batch();
-            
-            this.log('success', `Frame processed: ${batchResult}`);
-        } catch (error) {
-            const errorMessage = error instanceof Error ? error.message : String(error);
-            this.log('error', `Process error: ${errorMessage}`);
-        }
-    }
-
 
     private createReferenceData(): ReferenceData {
         return {

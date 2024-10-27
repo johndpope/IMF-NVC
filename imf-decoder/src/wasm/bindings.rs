@@ -9,7 +9,6 @@ use wgpu::*;
 use log::{info, error};
 use wgpu::util::DeviceExt;
 use crate::decoder::{Frame, Queue as FrameQueue};
-
 // Remove duplicate imports and update WebGPU imports
 use wgpu::{
     Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
@@ -52,29 +51,50 @@ impl RenderContext {
         width: u32,
         height: u32,
     ) -> Result<Self, JsValue> {
-        // Create instance with proper descriptor
+        // Create instance
         let instance = Instance::new(InstanceDescriptor {
             backends: Backends::all(),
             dx12_shader_compiler: Default::default(),
         });
-
-        // Get WebGPU adapter
+    
+        // Create surface from canvas
+        let surface = instance
+            .create_surface_from_canvas(canvas)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
+    
+        // Request adapter
         let adapter = instance
             .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::default(),
+                power_preference: PowerPreference::HighPerformance,
                 force_fallback_adapter: false,
-                compatible_surface: None,
+                compatible_surface: Some(&surface),
             })
             .await
             .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
-
-        // Create device and queue
+    
+        // Log adapter features and limits
+        web_sys::console::log_1(&"Adapter acquired".into());
+        web_sys::console::log_1(&format!("Adapter Features: {:?}", adapter.features()).into());
+        web_sys::console::log_1(&format!("Adapter Limits: {:?}", adapter.limits()).into());
+    
+        // Use minimal features and limits suitable for WebGL2 compatibility
+        let required_features = Features::empty();
+        let required_limits = Limits::downlevel_webgl2_defaults();
+    
+        // Clamp the limits to what the adapter supports
+        let limits = required_limits.using_resolution(adapter.limits());
+    
+        // Log requested features and limits
+        web_sys::console::log_1(&format!("Requested Features: {:?}", required_features).into());
+        web_sys::console::log_1(&format!("Requested Limits: {:?}", limits).into());
+    
+        // Request device with adjusted limits
         let (device, queue) = adapter
             .request_device(
                 &DeviceDescriptor {
                     label: None,
-                    features: Features::empty(),
-                    limits: Limits::default(),
+                    features: required_features,
+                    limits,
                 },
                 None,
             )
@@ -83,14 +103,11 @@ impl RenderContext {
 
         let device = Arc::new(device);
         let queue = Arc::new(queue);
-
-        // Create surface from canvas
-        let surface = instance.create_surface_from_canvas(canvas)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
-
+        
+        // Surface configuration
         let surface_caps = surface.get_capabilities(&adapter);
         let format = surface_caps.formats[0];
-
+    
         let surface_config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
             format,
@@ -100,15 +117,13 @@ impl RenderContext {
             alpha_mode: CompositeAlphaMode::Auto,
             view_formats: vec![],
         };
-
+    
         surface.configure(&device, &surface_config);
-
-        // Create the render context
-        let context = Self::new(device, queue, width, height);
-
-        Ok(context)
+    
+        // Create and return the render context
+        Ok(Self::new(device.clone(), queue.clone(), width, height))
     }
-
+    
     fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
         let format = TextureFormat::Bgra8UnormSrgb;
 
@@ -183,6 +198,7 @@ impl RenderContext {
         }
     }
 }
+
 
 #[wasm_bindgen]
 pub struct IMFDecoder {
