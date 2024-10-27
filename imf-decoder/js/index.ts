@@ -1,7 +1,6 @@
 import { init, verifyWasmBuild, runDecoderTests } from './utils/wasm-test';
 import { 
-    WasmModule, 
-    IMFDecoder, 
+    WasmModule,  
     ReferenceData, 
     FrameToken, 
     VerifyResult,
@@ -9,6 +8,8 @@ import {
     PlayerStatus,
     DecoderStatus 
 } from './types';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
 
 class TestUI {
     private decoder: IMFDecoder | null = null;
@@ -334,84 +335,99 @@ class TestUI {
             this.buttons.verify.disabled = false;
         }
     }
-
+    
+    
     private async initializeDecoder() {
         try {
             this.buttons.init.disabled = true;
             this.updateStatus('decoder', DecoderStatus.Initializing);
             
-            if (!this.decoder) {
-                throw new Error('Decoder not initialized');
+            if (!this.decoder || !this.canvas) {
+                throw new Error('Decoder or canvas not initialized');
             }
 
-            // Create and set reference data
-            const reference_data = this.createReferenceData();
-            await this.decoder.set_reference_data(reference_data);
-            
+            // Check for WebGPU support
+            if (!navigator.gpu) {
+                throw new Error('WebGPU not supported');
+            }
+
+            // Create and set reference data first
+            const referenceData: ReferenceData = this.createReferenceData();
+            const refResult = await this.decoder.set_reference_data(referenceData);
+            this.log('info', `Reference data set: ${refResult}`);
+
+            // Initialize WebGPU context
+            const initResult = await this.decoder.initialize_render_context(this.canvas);
+            this.log('info', `Render context initialized: ${initResult}`);
+
+            // Verify status
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Failed to initialize render context');
+            }
+
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);
             this.log('success', 'Decoder initialized successfully');
         } catch (error) {
-            this.log('error', `Initialization error: ${error.message}`);
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Initialization error: ${errorMessage}`);
             this.updateStatus('decoder', DecoderStatus.Idle);
+        } finally {
+            this.buttons.init.disabled = false;
+        }
+    }
+
+    private async processFrame() {
+        if (!this.decoder) return;
+
+        try {
+            const frameWidth = 640;
+            const frameHeight = 480;
+            const channelCount = 4; // RGBA
+            const frameData = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+            
+            const token: FrameToken = {
+                token: frameData,
+                frame_index: this.frameCount++
+            };
+
+            this.log('info', `Processing frame ${token.frame_index}`);
+            const processResult = await this.decoder.process_tokens([token]);
+            this.log('info', processResult);
+            
+            const batchResult = await this.decoder.process_batch();
+            this.log('success', `Batch processed: ${batchResult}`);
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Process error: ${errorMessage}`);
         }
     }
 
     private async startDecoderLoop() {
         if (!this.decoder || !this.canvas) return;
 
-        const frameWidth = 640;
-        const frameHeight = 480;
-        const channelCount = 4; // RGBA
-        
-        const animate = async () => {
-            try {
-                // Create test frame data with changing pattern
-                const frame = new Float32Array(frameWidth * frameHeight * channelCount);
-                
-                // Create a simple animation pattern
-                const time = this.frameCount * 0.05;
-                for (let y = 0; y < frameHeight; y++) {
-                    for (let x = 0; x < frameWidth; x++) {
-                        const i = (y * frameWidth + x) * channelCount;
-                        // Create animated gradient pattern
-                        frame[i] = (Math.sin(x * 0.01 + time) + 1) * 0.5; // R
-                        frame[i + 1] = (Math.cos(y * 0.01 + time) + 1) * 0.5; // G
-                        frame[i + 2] = (Math.sin((x + y) * 0.01 + time) + 1) * 0.5; // B
-                        frame[i + 3] = 1.0; // A
-                    }
-                }
-
-                const token: FrameToken = {
-                    token: frame,
-                    frame_index: this.frameCount++
-                };
-
-                // Process frame through decoder
-                await this.decoder.process_tokens([token]);
-                await this.decoder.process_batch();
-
-                // Request next frame if still playing
-                if (this.decoderStatus === DecoderStatus.Open) {
-                    this.animationFrameId = requestAnimationFrame(animate);
-                }
-
-                // Log frame stats every 60 frames
-                if (this.frameCount % 60 === 0) {
-                    const stats = await this.decoder.get_status();
-                    this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(stats)}`);
-                }
-
-            } catch (error) {
-                this.log('error', `Animation error: ${error}`);
-                this.pauseDecoder();
+        try {
+            // Verify render context is initialized
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
             }
-        };
 
-        // Start animation loop
-        this.animationFrameId = requestAnimationFrame(animate);
+            await this.decoder.start_player_loop();
+            this.updateStatus('decoder', DecoderStatus.Playing);
+            this.log('success', 'Decoder loop started');
+
+            // Start frame processing
+            this.processFrame();
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Start error: ${errorMessage}`);
+            this.updateStatus('decoder', DecoderStatus.Ready);
+        }
     }
-
+    
     private async startDecoder() {
         try {
             this.buttons.start.disabled = true;
@@ -420,13 +436,19 @@ class TestUI {
             if (!this.decoder) {
                 throw new Error('Decoder not initialized');
             }
-
+    
+            // Make sure render context is ready before starting the loop
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
+            }
+    
+            // Start the decoder's internal render loop
+            await this.decoder.start_player_loop();
+            
             // Enable frame processing and pause buttons
             this.buttons.process.disabled = false;
             this.buttons.pause.disabled = false;
-            
-            // Start the decoder's internal render loop
-            await this.decoder.start_player_loop();
             
             // Start our animation loop
             this.startDecoderLoop();
@@ -437,6 +459,87 @@ class TestUI {
             this.updateStatus('decoder', DecoderStatus.Ready);
         }
     }
+
+    // private async startDecoderLoop() {
+    //     if (!this.decoder || !this.canvas) return;
+
+    //     const frameWidth = 640;
+    //     const frameHeight = 480;
+    //     const channelCount = 4; // RGBA
+        
+    //     const animate = async () => {
+    //         try {
+    //             // Create test frame data with changing pattern
+    //             const frame = new Float32Array(frameWidth * frameHeight * channelCount);
+                
+    //             // Create a simple animation pattern
+    //             const time = this.frameCount * 0.05;
+    //             for (let y = 0; y < frameHeight; y++) {
+    //                 for (let x = 0; x < frameWidth; x++) {
+    //                     const i = (y * frameWidth + x) * channelCount;
+    //                     // Create animated gradient pattern
+    //                     frame[i] = (Math.sin(x * 0.01 + time) + 1) * 0.5; // R
+    //                     frame[i + 1] = (Math.cos(y * 0.01 + time) + 1) * 0.5; // G
+    //                     frame[i + 2] = (Math.sin((x + y) * 0.01 + time) + 1) * 0.5; // B
+    //                     frame[i + 3] = 1.0; // A
+    //                 }
+    //             }
+
+    //             const token: FrameToken = {
+    //                 token: frame,
+    //                 frame_index: this.frameCount++
+    //             };
+
+    //             // Process frame through decoder
+    //             await this.decoder.process_tokens([token]);
+    //             await this.decoder.process_batch();
+
+    //             // Request next frame if still playing
+    //             if (this.decoderStatus === DecoderStatus.Open) {
+    //                 this.animationFrameId = requestAnimationFrame(animate);
+    //             }
+
+    //             // Log frame stats every 60 frames
+    //             if (this.frameCount % 60 === 0) {
+    //                 const stats = await this.decoder.get_status();
+    //                 this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(stats)}`);
+    //             }
+
+    //         } catch (error) {
+    //             this.log('error', `Animation error: ${error}`);
+    //             this.pauseDecoder();
+    //         }
+    //     };
+
+    //     // Start animation loop
+    //     this.animationFrameId = requestAnimationFrame(animate);
+    // }
+
+    // private async startDecoder() {
+    //     try {
+    //         this.buttons.start.disabled = true;
+    //         this.updateStatus('decoder', DecoderStatus.Open);
+            
+    //         if (!this.decoder) {
+    //             throw new Error('Decoder not initialized');
+    //         }
+
+    //         // Enable frame processing and pause buttons
+    //         this.buttons.process.disabled = false;
+    //         this.buttons.pause.disabled = false;
+            
+    //         // Start the decoder's internal render loop
+    //         await this.decoder.start_player_loop();
+            
+    //         // Start our animation loop
+    //         this.startDecoderLoop();
+            
+    //         this.log('success', 'Decoder started');
+    //     } catch (error:any) {
+    //         this.log('error', `Start error: ${error.message}`);
+    //         this.updateStatus('decoder', DecoderStatus.Ready);
+    //     }
+    // }
 
     private async pauseDecoder() {
         try {

@@ -25,6 +25,7 @@
       "@/*": ["js/*"],
       "@pkg/*": ["pkg/*"],
       "@types/*": ["js/types/*"]
+      
     },
     "typeRoots": [
       "./node_modules/@types",
@@ -35,8 +36,10 @@
   "include": [
     "js/**/*.ts",
     "js/**/*.tsx",
-    "pkg/**/*.ts"
-  ],
+    "pkg/**/*.ts",
+    "js/**/*", "types/**/*"
+  ],  
+
   "exclude": [
     "node_modules",
     "dist",

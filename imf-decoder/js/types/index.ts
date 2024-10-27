@@ -1,5 +1,7 @@
 // js/types/index.ts
 import * as tf from '@tensorflow/tfjs';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
 // Enums
 export enum PlayerStatus {
   Idle = 0,
@@ -52,14 +54,7 @@ export interface WasmModule {
   [key: string]: any;
 }
 
-export interface IMFDecoder {
-  test: () => string;
-  diagnostic_mode: boolean;
-  set_reference_data: (data: ReferenceData) => Promise<string>;
-  process_tokens: (tokens: FrameToken[]) => Promise<string>;
-  process_batch: () => Promise<string>;
-  get_reference_status: () => string;
-}
+
 
 // Result Interfaces
 export interface VerifyResult {
