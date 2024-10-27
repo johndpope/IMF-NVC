@@ -8,13 +8,7 @@ rustup target add wasm32-unknown-unknown
 # Install wasm-pack
 cargo install wasm-pack
 
-# Install Node.js dependencies
-npm install --save-dev \
-  webpack \
-  webpack-cli \
-  webpack-dev-server \
-  @wasm-tool/wasm-pack-plugin \
-  copy-webpack-plugin
+
 
 # Install runtime dependencies
 npm install \

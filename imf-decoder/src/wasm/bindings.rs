@@ -333,16 +333,19 @@ impl IMFDecoder {
     
     #[wasm_bindgen(constructor)]
     pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
-        // Only initialize if not already initialized
         let _ = console_error_panic_hook::set_once();
         let _ = wasm_logger::init(wasm_logger::Config::default());
         
-        info!("Creating IMFDecoder with dimensions {}x{}", width, height);
+        const QUEUE_SIZE: usize = 10000;  // Increased from 60 to 10,000
+        const BATCH_SIZE: usize = 4;      // Keep batch size the same
+        
+        info!("Creating IMFDecoder with dimensions {}x{} and queue capacity {}", 
+            width, height, QUEUE_SIZE);
 
         Ok(Self {
             width,
             height,
-            frame_queue: FrameQueue::new(60, 4),
+            frame_queue: FrameQueue::new(QUEUE_SIZE, BATCH_SIZE),
             canvas: None,
             render_context: None,
             animation_id: None,
@@ -606,55 +609,61 @@ impl IMFDecoder {
     #[wasm_bindgen]
     pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
         let decoder_ptr = self as *mut IMFDecoder;
-        
-        // Create a new animation closure
-        let closure = Closure::wrap(Box::new(move || {
+        let callback_fn = Box::new(move || {
             let decoder = unsafe { &mut *decoder_ptr };
             
+            debug!("Animation frame callback start");
             if let Err(e) = decoder.render_frame() {
                 error!("Render error: {:?}", e);
                 return;
             }
-
-            // Request next frame
+            
+            // Request next frame if window exists
             if let Some(window) = web_sys::window() {
                 if let Some(closure) = &decoder.animation_closure {
                     if let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) {
+                        debug!("Scheduled next frame with id: {}", id);
                         decoder.animation_id = Some(id);
                     }
                 }
             }
             
             decoder.frame_count += 1;
-        }) as Box<dyn FnMut()>);
+            debug!("Animation frame callback complete");
+        });
 
-        // Store closure in IMFDecoder
-        self.animation_closure = Some(closure);
+        // Create the animation closure
+        let closure = Closure::wrap(callback_fn as Box<dyn FnMut()>);
 
         // Start the animation loop
         let window = web_sys::window()
             .ok_or_else(|| JsValue::from_str("No window found"))?;
 
-        if let Some(closure) = &self.animation_closure {
-            let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
-            self.animation_id = Some(id);
-        }
+        let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+        debug!("Initial animation frame scheduled with id: {}", id);
+        
+        self.animation_id = Some(id);
+        self.animation_closure = Some(closure);
 
         Ok(())
     }
-
-    
     #[wasm_bindgen]
     pub fn stop_player_loop(&mut self) {
-        // Cancel any existing animation frame
+        debug!("Stopping player loop");
+        
+        // Cancel animation frame
         if let Some(id) = self.animation_id.take() {
             if let Some(window) = web_sys::window() {
+                debug!("Canceling animation frame {}", id);
                 let _ = window.cancel_animation_frame(id);
             }
         }
 
-        // Clear the animation closure
-        self.animation_closure = None;
+        // Drop the closure
+        if self.animation_closure.take().is_some() {
+            debug!("Animation closure dropped");
+        }
+        
         info!("Player loop stopped");
     }
 
@@ -747,13 +756,12 @@ impl IMFDecoder {
             })?;
 
         if let Some(frame) = self.frame_queue.process_next() {
-            debug!("Got next frame from queue, creating command encoder");
+            debug!("Got next frame from queue, frame size: {}x{}", self.width, self.height);
             
             let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
                 label: Some("Render Encoder"),
             });
 
-            debug!("Writing texture data, size: {}x{}", self.width, self.height);
             // Update texture with frame data
             context.queue.write_texture(
                 ImageCopyTexture {
@@ -775,9 +783,8 @@ impl IMFDecoder {
                 },
             );
 
-            // Render pass
+            debug!("Starting render pass");
             {
-                debug!("Beginning render pass");
                 let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
                     label: Some("Main Render Pass"),
                     color_attachments: &[Some(RenderPassColorAttachment {
@@ -791,7 +798,6 @@ impl IMFDecoder {
                     depth_stencil_attachment: None,
                 });
 
-                debug!("Setting pipeline and vertex buffer");
                 render_pass.set_pipeline(&context.pipeline);
                 render_pass.set_bind_group(0, &context.bind_group, &[]);
                 render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
@@ -802,7 +808,6 @@ impl IMFDecoder {
             context.queue.submit(std::iter::once(encoder.finish()));
 
             if self.diagnostic_mode {
-                debug!("Updating metrics");
                 self.update_metrics();
             }
         } else {
