@@ -132,6 +132,8 @@ pub struct IMFDecoder {
 
 #[wasm_bindgen]
 impl IMFDecoder {
+
+    
     #[wasm_bindgen(constructor)]
     pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
         console_error_panic_hook::set_once();
@@ -151,6 +153,240 @@ impl IMFDecoder {
             last_frame_time: 0.0,
             animation_closure: None,
         })
+    }
+    #[wasm_bindgen]
+    pub fn get_capabilities(&self) -> JsValue {
+        let capabilities = js_sys::Object::new();
+        
+        js_sys::Reflect::set(
+            &capabilities,
+            &"version".into(),
+            &"1.0.0".into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"dimensions".into(),
+            &format!("{}x{}", self.width, self.height).into()
+        ).unwrap();
+
+        // Create features array
+        let features = js_sys::Array::new();
+        features.push(&"WebGPU".into());
+        features.push(&"Tensor Processing".into());
+        features.push(&"Frame Queue".into());
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"features".into(),
+            &features
+        ).unwrap();
+
+        // Create methods array
+        let methods = js_sys::Array::new();
+        methods.push(&"test".into());
+        methods.push(&"start_player_loop".into());
+        methods.push(&"stop_player_loop".into());
+        methods.push(&"set_reference_data".into());
+        methods.push(&"process_tokens".into());
+        methods.push(&"process_batch".into());
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"methods".into(),
+            &methods
+        ).unwrap();
+
+        // Add performance capabilities
+        let performance = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &performance,
+            &"maxQueueSize".into(),
+            &(60_i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &performance,
+            &"batchSize".into(),
+            &(4_i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &performance,
+            &"targetFPS".into(),
+            &(60_i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"performance".into(),
+            &performance
+        ).unwrap();
+
+        // Add diagnostic info
+        let diagnostics = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &diagnostics,
+            &"frameCounter".into(),
+            &(self.frame_count as i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &diagnostics,
+            &"diagnosticMode".into(),
+            &self.diagnostic_mode.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"diagnostics".into(),
+            &diagnostics
+        ).unwrap();
+
+        capabilities.into()
+    }
+
+    #[wasm_bindgen]
+    pub fn test(&self) -> String {
+        let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
+        info!("{}", msg);
+        msg
+    }
+
+    #[wasm_bindgen]
+    pub fn get_status(&self) -> JsValue {
+        let status = js_sys::Object::new();
+
+        // Basic status
+        js_sys::Reflect::set(
+            &status,
+            &"initialized".into(),
+            &self.render_context.is_some().into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &status,
+            &"running".into(),
+            &self.animation_id.is_some().into()
+        ).unwrap();
+
+        // Performance metrics
+        let metrics = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &metrics,
+            &"frameCount".into(),
+            &(self.frame_count as i32).into()
+        ).unwrap();
+        
+        if let Some(window) = web_sys::window() {
+            if let Some(perf) = window.performance() {
+                js_sys::Reflect::set(
+                    &metrics,
+                    &"lastFrameTime".into(),
+                    &self.last_frame_time.into()
+                ).unwrap();
+            }
+        }
+
+        js_sys::Reflect::set(&status, &"metrics".into(), &metrics).unwrap();
+
+        // Queue status using correct method names
+        let queue_status = js_sys::Object::new();
+        let (input_size, processing_size, output_size) = self.frame_queue.get_queue_sizes();
+        
+        js_sys::Reflect::set(
+            &queue_status,
+            &"inputQueueSize".into(),
+            &(input_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"processingQueueSize".into(),
+            &(processing_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"outputQueueSize".into(),
+            &(output_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"maxSize".into(),
+            &(self.frame_queue.get_max_size() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"batchSize".into(),
+            &(self.frame_queue.get_batch_size() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"isFull".into(),
+            &self.frame_queue.is_full().into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"isEmpty".into(),
+            &self.frame_queue.is_empty().into()
+        ).unwrap();
+
+        // Add additional metrics
+        js_sys::Reflect::set(
+            &queue_status,
+            &"framesProcessed".into(),
+            &(self.frame_queue.get_frames_processed() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"framesDropped".into(),
+            &(self.frame_queue.get_frames_dropped() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"processingTime".into(),
+            &self.frame_queue.get_processing_time().into()
+        ).unwrap();
+
+        // Add queue stats
+        let stats = self.frame_queue.get_metrics();
+        let queue_metrics = js_sys::Object::new();
+        
+        js_sys::Reflect::set(
+            &queue_metrics,
+            &"averageProcessingTime".into(),
+            &stats.average_processing_time.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_metrics,
+            &"queueUtilization".into(),
+            &stats.queue_utilization.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"metrics".into(),
+            &queue_metrics
+        ).unwrap();
+
+        js_sys::Reflect::set(&status, &"queue".into(), &queue_status).unwrap();
+
+        // Debug info
+        let debug = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &debug,
+            &"diagnosticMode".into(),
+            &self.diagnostic_mode.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(&status, &"debug".into(), &debug).unwrap();
+
+        status.into()
     }
 
     #[wasm_bindgen]
