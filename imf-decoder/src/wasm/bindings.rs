@@ -6,9 +6,16 @@ use std::sync::Arc;
 use std::rc::Rc;
 use std::cell::RefCell;
 use wgpu::*;
-use log::{info, error};
+use log::{info, error, debug};
 use wgpu::util::DeviceExt;
 use crate::decoder::{Frame, Queue as FrameQueue};
+
+
+
+
+
+
+
 // Remove duplicate imports and update WebGPU imports
 use wgpu::{
     Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
@@ -302,33 +309,8 @@ impl RenderContext {
         // Create RenderContext using primary constructor
         Ok(Self::new(device.clone(), queue.clone(), width, height))
     }
-    fn render_frame(&mut self) -> Result<(), JsValue> {
-        let mut encoder = self.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("Render Pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &self.texture_view,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(Color::BLACK),
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
-
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.draw(0..4, 0..1);
-        }
-
-        self.queue.submit(std::iter::once(encoder.finish()));
-        Ok(())
-    }
+    
+    
 }
 #[wasm_bindgen]
 pub struct IMFDecoder {
@@ -623,125 +605,55 @@ impl IMFDecoder {
 
     #[wasm_bindgen]
     pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
-        // Create a shared reference to self
-        let decoder = Rc::new(RefCell::new(self as *mut IMFDecoder));
-        let decoder_clone = decoder.clone();
-
-        // Create the animation frame closure
+        let decoder_ptr = self as *mut IMFDecoder;
+        
+        // Create a new animation closure
         let closure = Closure::wrap(Box::new(move || {
-            let decoder = unsafe { &mut *decoder_clone.borrow().clone() };
+            let decoder = unsafe { &mut *decoder_ptr };
             
             if let Err(e) = decoder.render_frame() {
                 error!("Render error: {:?}", e);
+                return;
             }
 
             // Request next frame
             if let Some(window) = web_sys::window() {
-                if let Ok(id) = window.request_animation_frame(
-                    decoder.animation_closure.as_ref().unwrap().as_ref().unchecked_ref()
-                ) {
-                    decoder.animation_id = Some(id);
+                if let Some(closure) = &decoder.animation_closure {
+                    if let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) {
+                        decoder.animation_id = Some(id);
+                    }
                 }
             }
             
             decoder.frame_count += 1;
         }) as Box<dyn FnMut()>);
 
+        // Store closure in IMFDecoder
+        self.animation_closure = Some(closure);
+
         // Start the animation loop
         let window = web_sys::window()
             .ok_or_else(|| JsValue::from_str("No window found"))?;
 
-        let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
-        
-        self.animation_id = Some(id);
-        self.animation_closure = Some(closure);
-
-        Ok(())
-    }
-
-    fn render_frame(&mut self) -> Result<(), JsValue> {
-        let context = self.render_context.as_ref()
-            .ok_or_else(|| JsValue::from_str("Render context not initialized"))?;
-
-        if let Some(frame) = self.frame_queue.process_next() {
-            // Create command encoder
-            let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
-
-            // Update texture with frame data
-            context.queue.write_texture(
-                ImageCopyTexture {
-                    texture: &context.texture,
-                    mip_level: 0,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                &frame.data,
-                ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.width * 4),
-                    rows_per_image: Some(self.height),
-                },
-                Extent3d {
-                    width: self.width,
-                    height: self.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-
-            // Render pass
-            {
-                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Main Render Pass"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &context.texture_view,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Clear(Color::BLACK),
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                });
-
-                render_pass.set_pipeline(&context.pipeline);
-                render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
-                render_pass.draw(0..4, 0..1);
-            }
-
-            // Submit commands
-            context.queue.submit(std::iter::once(encoder.finish()));
-
-            if self.diagnostic_mode {
-                self.update_metrics();
-            }
+        if let Some(closure) = &self.animation_closure {
+            let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+            self.animation_id = Some(id);
         }
 
         Ok(())
     }
 
-    fn update_metrics(&mut self) {
-        if let Some(window) = web_sys::window() {
-            if let Some(performance) = window.performance() {
-                let now = performance.now();
-                let frame_time = now - self.last_frame_time;
-                self.last_frame_time = now;
-
-                let fps = 1000.0 / frame_time;
-                info!("Frame {}: {:.2} FPS (frame time: {:.2}ms)", 
-                    self.frame_count, fps, frame_time);
-            }
-        }
-    }
     
     #[wasm_bindgen]
     pub fn stop_player_loop(&mut self) {
+        // Cancel any existing animation frame
         if let Some(id) = self.animation_id.take() {
             if let Some(window) = web_sys::window() {
                 let _ = window.cancel_animation_frame(id);
             }
         }
+
+        // Clear the animation closure
         self.animation_closure = None;
         info!("Player loop stopped");
     }
@@ -788,20 +700,141 @@ impl IMFDecoder {
         Ok("Reference data set successfully".to_string())
     }
 
+  
     #[wasm_bindgen]
     pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
-        info!("Processing tokens...");
+        info!("Starting token processing...");
         
-        let frame_tokens: Vec<FrameToken> = serde_wasm_bindgen::from_value(tokens)?;
+        let frame_tokens: Vec<FrameToken> = match serde_wasm_bindgen::from_value::<Vec<FrameToken>>(tokens) {
+            Ok(t) => {
+                info!("Successfully deserialized {} tokens", t.len());
+                t
+            },
+            Err(e) => {
+                error!("Failed to deserialize tokens: {:?}", e);
+                return Err(JsValue::from_str(&format!("Token deserialization failed: {:?}", e)));
+            }
+        };
+        
         let token_count = frame_tokens.len();
+        info!("Processing {} tokens", token_count);
         
-        for token in frame_tokens {
+        for (idx, token) in frame_tokens.iter().enumerate() {
+            info!("Processing token {}/{} with frame index {}", idx + 1, token_count, token.frame_index);
+            debug!("Token data length: {}", token.token.len());
+            
             let mut frame = Frame::new(self.width as usize, self.height as usize);
-            frame.set_data(token.token.iter().map(|&x| x as u8).collect());
+            let frame_data: Vec<u8> = token.token.iter().map(|&x| x as u8).collect();
+            debug!("Converted frame data length: {}", frame_data.len());
+            
+            frame.set_data(frame_data);
+            debug!("Frame data set, pushing to queue");
+            
             self.frame_queue.push(frame);
         }
         
-        Ok(format!("Processed {} tokens successfully", token_count))
+        info!("Token processing complete");
+        Ok(format!("Successfully processed {} tokens", token_count))
+    }
+
+    fn render_frame(&mut self) -> Result<(), JsValue> {
+        debug!("Starting render frame");
+        
+        let context = self.render_context.as_ref()
+            .ok_or_else(|| {
+                error!("Render context not initialized");
+                JsValue::from_str("Render context not initialized")
+            })?;
+
+        if let Some(frame) = self.frame_queue.process_next() {
+            debug!("Got next frame from queue, creating command encoder");
+            
+            let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            });
+
+            debug!("Writing texture data, size: {}x{}", self.width, self.height);
+            // Update texture with frame data
+            context.queue.write_texture(
+                ImageCopyTexture {
+                    texture: &context.texture,
+                    mip_level: 0,
+                    origin: Origin3d::ZERO,
+                    aspect: TextureAspect::All,
+                },
+                &frame.data,
+                ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.width * 4),
+                    rows_per_image: Some(self.height),
+                },
+                Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+
+            // Render pass
+            {
+                debug!("Beginning render pass");
+                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                    label: Some("Main Render Pass"),
+                    color_attachments: &[Some(RenderPassColorAttachment {
+                        view: &context.texture_view,
+                        resolve_target: None,
+                        ops: Operations {
+                            load: LoadOp::Clear(Color::BLACK),
+                            store: true,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                });
+
+                debug!("Setting pipeline and vertex buffer");
+                render_pass.set_pipeline(&context.pipeline);
+                render_pass.set_bind_group(0, &context.bind_group, &[]);
+                render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
+                render_pass.draw(0..4, 0..1);
+            }
+
+            debug!("Submitting command buffer");
+            context.queue.submit(std::iter::once(encoder.finish()));
+
+            if self.diagnostic_mode {
+                debug!("Updating metrics");
+                self.update_metrics();
+            }
+        } else {
+            debug!("No frame available from queue");
+        }
+
+        debug!("Render frame complete");
+        Ok(())
+    }
+
+
+    fn update_metrics(&mut self) {
+        if let Some(window) = web_sys::window() {
+            if let Some(_performance) = window.performance() {
+                let now = _performance.now();
+                let frame_time = now - self.last_frame_time;
+                self.last_frame_time = now;
+
+                let fps = 1000.0 / frame_time;
+                info!("Frame {} metrics:", self.frame_count);
+                debug!("  - Frame time: {:.2}ms", frame_time);
+                debug!("  - FPS: {:.2}", fps);
+                debug!("  - Queue status: {:?}", self.frame_queue.get_queue_sizes());
+                
+                if self.frame_count % 60 == 0 {
+                    info!("Performance report:");
+                    info!("  - Average FPS: {:.2}", fps);
+                    info!("  - Frame time: {:.2}ms", frame_time);
+                    info!("  - Frames processed: {}", self.frame_count);
+                }
+            }
+        }
     }
 
     #[wasm_bindgen]

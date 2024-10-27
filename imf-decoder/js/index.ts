@@ -37,7 +37,7 @@ class TestUI {
         this.setupLayout();
         this.initializeElements();
         this.setupEventListeners();
-        this.interceptConsole();
+        // this.interceptConsole();
         this.setupCanvas();
     }
 
