@@ -6,14 +6,7 @@ import {
   VerifyResult,
   TestResult 
 } from '../types';
-import { 
-  WasmModule, 
-  IMFDecoder, 
-  ReferenceData, 
-  FrameToken, 
-  VerifyResult,
-  TestResult 
-} from '../types';
+
 
 async function verifyWasmBuild(): Promise<VerifyResult> {
   try {
@@ -179,8 +172,13 @@ async function verifyWasmBuild(): Promise<VerifyResult> {
       try {
         // Additional debugging info
         // const wasm_module = await import('../pkg/imf_decoder.js');
-        await wasm_module();
-        console.log('Available exports:', Object.keys(wasm_module));
+        const wasm_module = await import('@pkg/imf_decoder');
+      
+        // Wait for module initialization
+        await wasm_module.default();
+        
+        // Log all available exports
+        console.log('📦 WASM Exports:', Object.keys(wasm_module));
       } catch (importError) {
         console.error('Failed to import WASM module:', importError);
       }

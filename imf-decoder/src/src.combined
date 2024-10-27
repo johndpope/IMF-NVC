@@ -1,0 +1,708 @@
+# lib.rs
+use wasm_bindgen::prelude::*;
+
+pub mod decoder;
+pub mod utils;
+pub mod wasm;
+
+// Re-export for JavaScript
+pub use wasm::bindings::*;
+
+// Initialize panic hook
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+}
+
+# wasm/mod.rs
+pub mod bindings;
+
+// Re-export the bindings
+pub use bindings::*;
+
+# wasm/bindings.rs
+use wasm_bindgen::prelude::*;
+use crate::decoder::{Frame, Queue, WebGLDecoder};
+use serde::{Serialize, Deserialize};
+
+// Create helper for logging
+macro_rules! console_log {
+    ($($t:tt)*) => {
+        web_sys::console::log_1(&format!($($t)*).into())
+    }
+}
+
+
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceFeature {
+    tensor: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceData {
+    features: Vec<ReferenceFeature>,
+    token: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrameToken {
+    token: Vec<f32>,
+    frame_index: usize,
+}
+
+#[wasm_bindgen]
+pub struct IMFDecoder {
+    width: u32,
+    height: u32,
+    queue: Queue,
+    webgl: WebGLDecoder,
+    reference_data: Option<ReferenceData>,
+    diagnostic_mode: bool,
+}
+
+#[wasm_bindgen]
+impl IMFDecoder {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
+        console_log!("Creating new IMF decoder with dimensions {}x{}", width, height);
+        console_error_panic_hook::set_once();
+        let webgl = WebGLDecoder::new()?;
+        
+        Ok(Self {
+            width,
+            height,
+            queue: Queue::new(60, 4),
+            webgl,
+            reference_data: None,
+            diagnostic_mode: false,
+        })
+    }
+
+    #[wasm_bindgen]
+    pub fn test(&self) -> String {
+        let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
+        console_log!("{}", msg);
+        msg
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn diagnostic_mode(&self) -> bool {
+        self.diagnostic_mode
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_diagnostic_mode(&mut self, value: bool) {
+        self.diagnostic_mode = value;
+        console_log!("Diagnostic mode set to: {}", value);
+    }
+
+    // Set reference data from TensorFlow.js
+    #[wasm_bindgen]
+    pub fn set_reference_data(&mut self, data: JsValue) -> Result<String, JsValue> {
+        console_log!("Setting reference data...");
+        
+        let ref_data: ReferenceData = serde_wasm_bindgen::from_value(data)?;
+        
+        // Validate tensor shapes match IMF requirements
+        let expected_shapes = vec![
+            vec![1, 128, 64, 64],
+            vec![1, 256, 32, 32],
+            vec![1, 512, 16, 16],
+            vec![1, 512, 8, 8],
+        ];
+
+        for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
+            if feature.shape != *expected {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid tensor shape: {:?}, expected: {:?}", 
+                    feature.shape, expected
+                )));
+            }
+        }
+
+        // Validate token size
+        if ref_data.token.len() != 32 {
+            return Err(JsValue::from_str("Reference token must be length 32"));
+        }
+
+        self.reference_data = Some(ref_data);
+        Ok("Reference data set successfully".to_string())
+    }
+
+
+    #[wasm_bindgen]
+    pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
+        console_log!("Processing tokens...");
+        
+        match serde_wasm_bindgen::from_value::<Vec<FrameToken>>(tokens) {
+            Ok(frame_tokens) => {
+                let token_count = frame_tokens.len();
+                
+                // Use reference in the loop to avoid moving frame_tokens
+                for token in &frame_tokens {
+                    let mut frame = Frame::new(self.width as usize, self.height as usize);
+                    // Clone the token data since we're working with a reference
+                    frame.set_data(token.token.iter().map(|&x| x as u8).collect());
+                    self.queue.push(frame);
+                }
+                
+                Ok(format!("Processed {} tokens successfully", token_count))
+            }
+            Err(err) => Err(JsValue::from_str(&format!("Failed to process tokens: {}", err)))
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn process_batch(&mut self) -> Result<String, JsValue> {
+        console_log!("Processing batch...");
+        let processed = self.queue.process_batch();
+        Ok(format!("Processed batch: {} frames", processed.len()))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_reference_status(&self) -> String {
+        match &self.reference_data {
+            Some(ref_data) => format!(
+                "Reference data loaded: {} features",
+                ref_data.features.len()
+            ),
+            None => "No reference data loaded".to_string(),
+        }
+    }
+
+    
+}
+
+// Helper struct for passing tensor data between Rust and JavaScript
+#[derive(Serialize, Deserialize)]
+struct TensorData {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+// JavaScript bindings for IMF operations
+#[wasm_bindgen]
+extern "C" {
+    // Define JavaScript functions that will be called from Rust
+    #[wasm_bindgen(js_namespace = tf, js_name = tensor)]
+    fn create_tensor(data: &[f32], shape: &[usize]) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = tf, js_name = tidy)]
+    fn tensor_tidy(callback: &Closure<dyn FnMut() -> JsValue>) -> JsValue;
+}
+
+# decoder/webgl.rs
+use wasm_bindgen::prelude::*;
+use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader};
+use wasm_bindgen::JsCast;
+
+pub struct WebGLDecoder {
+    context: WebGl2RenderingContext,
+    program: WebGlProgram,
+    vertex_shader: WebGlShader,
+    fragment_shader: WebGlShader,
+}
+
+impl WebGLDecoder {
+    pub fn new() -> Result<Self, JsValue> {
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let canvas = document
+            .create_element("canvas")?
+            .dyn_into::<web_sys::HtmlCanvasElement>()?;
+
+        let context = canvas
+            .get_context("webgl2")?
+            .unwrap()
+            .dyn_into::<WebGl2RenderingContext>()?;
+
+        // Initialize shaders and program
+        let vertex_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::VERTEX_SHADER,
+            r#"#version 300 es
+            in vec4 position;
+            void main() {
+                gl_Position = position;
+            }
+            "#,
+        )?;
+
+        let fragment_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::FRAGMENT_SHADER,
+            r#"#version 300 es
+            precision highp float;
+            out vec4 outColor;
+            void main() {
+                outColor = vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            "#,
+        )?;
+
+        let program = link_program(&context, &vertex_shader, &fragment_shader)?;
+
+        Ok(Self {
+            context,
+            program,
+            vertex_shader,
+            fragment_shader,
+        })
+    }
+}
+
+fn compile_shader(
+    context: &WebGl2RenderingContext,
+    shader_type: u32,
+    source: &str,
+) -> Result<WebGlShader, String> {
+    let shader = context
+        .create_shader(shader_type)
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+    context.shader_source(&shader, source);
+    context.compile_shader(&shader);
+
+    if context
+        .get_shader_parameter(&shader, WebGl2RenderingContext::COMPILE_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(shader)
+    } else {
+        Err(context
+            .get_shader_info_log(&shader)
+            .unwrap_or_else(|| String::from("Unknown error creating shader")))
+    }
+}
+
+fn link_program(
+    context: &WebGl2RenderingContext,
+    vert_shader: &WebGlShader,
+    frag_shader: &WebGlShader,
+) -> Result<WebGlProgram, String> {
+    let program = context
+        .create_program()
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+
+    context.attach_shader(&program, vert_shader);
+    context.attach_shader(&program, frag_shader);
+    context.link_program(&program);
+
+    if context
+        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(program)
+    } else {
+        Err(context
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| String::from("Unknown error creating program")))
+    }
+}
+
+# decoder/worker.rs
+use wasm_bindgen::prelude::*;
+use serde::{Serialize, Deserialize};
+use web_sys::WorkerGlobalScope;
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecoderStatus {
+    Idle = 0,
+    Initializing = 1,
+    Inited = 2,
+    Ready = 3,
+    Open = 4,
+    Pause = 5,
+    Closed = 6,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecodeMessage {
+    DecoderCreated = 0,
+    DecoderInit = 1,
+    DecoderInited = 2,
+    WasmLoaded = 3,
+    DecoderReady = 4,
+    DecoderOpenError = 5,
+    DecoderStart = 6,
+    DecoderStarted = 7,
+    DecoderPause = 8,
+    DecoderPaused = 9,
+    DecoderClose = 10,
+    DecoderClosed = 11,
+    DecodeVideoBuffer = 12,
+    DecodedVideoFrame = 13,
+}
+
+#[wasm_bindgen]
+pub struct DecoderWorker {
+    status: DecoderStatus,
+    decoder: IMFDecoder,
+    scope: WorkerGlobalScope,
+}
+
+#[wasm_bindgen]
+impl DecoderWorker {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<DecoderWorker, JsValue> {
+        let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
+        let decoder = IMFDecoder::new(1920, 1080)?;
+        
+        let worker = DecoderWorker {
+            status: DecoderStatus::Idle,
+            decoder,
+            scope,
+        };
+
+        worker.post_message(DecodeMessage::DecoderCreated);
+        Ok(worker)
+    }
+
+    fn post_message(&self, msg: DecodeMessage) {
+        let msg_val = serde_wasm_bindgen::to_value(&msg).unwrap();
+        self.scope.post_message(&msg_val).unwrap();
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        self.status = DecoderStatus::Initializing;
+        self.post_message(DecodeMessage::DecoderInit);
+        
+        // Initialize decoder
+        self.decoder.test();
+        
+        self.status = DecoderStatus::Inited;
+        self.post_message(DecodeMessage::DecoderInited);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Ready {
+            return Err(JsValue::from_str("Decoder not ready"));
+        }
+
+        self.status = DecoderStatus::Open;
+        self.post_message(DecodeMessage::DecoderStarted);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.status = DecoderStatus::Pause;
+        self.post_message(DecodeMessage::DecoderPaused);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn process_frame(&mut self, frame_data: JsValue) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.decoder.process_tokens(frame_data)?;
+        self.decoder.process_batch()?;
+        
+        self.post_message(DecodeMessage::DecodedVideoFrame);
+        Ok(())
+    }
+}
+
+# decoder/queue.rs
+use std::collections::VecDeque;
+use super::frame::Frame;
+use crate::utils::metrics::Metrics;
+
+pub struct Queue {
+    input_queue: VecDeque<Frame>,
+    processing_queue: VecDeque<Frame>,
+    output_queue: VecDeque<Frame>,
+    max_size: usize,
+    batch_size: usize,
+    metrics: Metrics,
+}
+
+impl Queue {
+    pub fn new(max_size: usize, batch_size: usize) -> Self {
+        Self {
+            input_queue: VecDeque::with_capacity(max_size),
+            processing_queue: VecDeque::with_capacity(batch_size),
+            output_queue: VecDeque::with_capacity(max_size),
+            max_size,
+            batch_size,
+            metrics: Metrics::new(),
+        }
+    }
+
+    pub fn push(&mut self, frame: Frame) -> bool {
+        if self.input_queue.len() < self.max_size {
+            self.input_queue.push_back(frame);
+            self.metrics.record_queue_size(self.input_queue.len());
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn process_batch(&mut self) -> Vec<Frame> {
+        let start_time = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now();
+
+        let mut batch = Vec::new();
+        while batch.len() < self.batch_size && !self.input_queue.is_empty() {
+            if let Some(frame) = self.input_queue.pop_front() {
+                batch.push(frame);
+            }
+        }
+
+        let processing_time = web_sys::window()
+            .unwrap()
+            .performance()
+            .unwrap()
+            .now() - start_time;
+        
+        self.metrics.record_processing_time(processing_time);
+        batch
+    }
+}
+
+
+# decoder/mod.rs
+pub mod frame;
+pub mod queue;
+pub mod tensor;
+pub mod webgl;
+
+pub use frame::Frame;
+pub use queue::Queue;
+pub use tensor::Tensor;
+pub use webgl::WebGLDecoder;
+
+
+# decoder/frame.rs
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Frame {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<u8>,
+    pub timestamp: f64,
+    pub is_keyframe: bool,
+}
+
+impl Frame {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0; width * height * 4],
+            timestamp: 0.0,
+            is_keyframe: false,
+        }
+    }
+
+    pub fn set_data(&mut self, data: Vec<u8>) {
+        assert_eq!(data.len(), self.width * self.height * 4);
+        self.data = data;
+    }
+}
+
+# decoder/tensor.rs
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct Tensor {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[wasm_bindgen]
+impl Tensor {
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Self {
+        Self { data, shape }
+    }
+
+    pub fn reshape(&mut self, new_shape: Vec<usize>) {
+        let total_size: usize = new_shape.iter().product();
+        assert_eq!(total_size, self.data.len());
+        self.shape = new_shape;
+    }
+
+    pub fn get_data(&self) -> Vec<f32> {
+        self.data.clone()
+    }
+}
+
+
+# utils/memory.rs
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub struct Memory {
+    allocated: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Memory {
+    pub fn new() -> Self {
+        Self {
+            allocated: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn allocate(&self, size: usize) {
+        let new_allocated = self.allocated.fetch_add(size, Ordering::SeqCst) + size;
+        let mut peak = self.peak.load(Ordering::SeqCst);
+        while new_allocated > peak {
+            match self.peak.compare_exchange(
+                peak,
+                new_allocated,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(x) => peak = x,
+            }
+        }
+    }
+
+    pub fn deallocate(&self, size: usize) {
+        self.allocated.fetch_sub(size, Ordering::SeqCst);
+    }
+}
+
+# utils/metrics.rs
+pub struct Metrics {
+    frame_times: Vec<f64>,
+    queue_sizes: Vec<usize>,
+    processing_times: Vec<f64>,
+    window_size: usize,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            frame_times: Vec::new(),
+            queue_sizes: Vec::new(),
+            processing_times: Vec::new(),
+            window_size: 60,
+        }
+    }
+
+    pub fn record_frame_time(&mut self, time: f64) {
+        self.frame_times.push(time);
+        if self.frame_times.len() > self.window_size {
+            self.frame_times.remove(0);
+        }
+    }
+
+    pub fn record_queue_size(&mut self, size: usize) {
+        self.queue_sizes.push(size);
+        if self.queue_sizes.len() > self.window_size {
+            self.queue_sizes.remove(0);
+        }
+    }
+
+    pub fn record_processing_time(&mut self, time: f64) {
+        self.processing_times.push(time);
+        if self.processing_times.len() > self.window_size {
+            self.processing_times.remove(0);
+        }
+    }
+}
+
+# utils/mod.rs
+pub mod memory;
+pub mod metrics;
+
+pub use memory::Memory;
+pub use metrics::Metrics;
+
+# player.rs
+use wasm_bindgen::prelude::*;
+use web_sys::{Worker, MessageEvent};
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum PlayerStatus {
+    Idle = 0,
+    Ready = 1,
+    Playing = 2,
+    Pause = 3,
+    Destroyed = 4,
+}
+
+#[wasm_bindgen]
+pub struct Player {
+    status: PlayerStatus,
+    worker: Option<Worker>,
+    width: u32,
+    height: u32,
+}
+
+#[wasm_bindgen]
+impl Player {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<Player, JsValue> {
+        let worker = Worker::new("./decoder.worker.js")?;
+        
+        let player = Player {
+            status: PlayerStatus::Idle,
+            worker: Some(worker),
+            width,
+            height,
+        };
+
+        Ok(player)
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("initialize");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Ready;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Ready {
+            return Err(JsValue::from_str("Player not ready"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("start");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Playing;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Playing {
+            return Err(JsValue::from_str("Player not playing"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("pause");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Pause;
+        }
+        Ok(())
+    }
+}
+

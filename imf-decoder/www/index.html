@@ -23,19 +23,30 @@
         .test-button:disabled {
             background-color: #ccc;
         }
-        .status {
+        .status-panel {
             margin: 10px 0;
             padding: 10px;
+            background-color: #f8f9fa;
             border-radius: 4px;
         }
-        .success {
-            background-color: #d4edda;
-            color: #155724;
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
         }
-        .error {
-            background-color: #f8d7da;
-            color: #721c24;
+        .status-label {
+            font-weight: bold;
         }
+        .status-value {
+            padding: 2px 8px;
+            border-radius: 3px;
+        }
+        .status-idle { background-color: #e2e3e5; }
+        .status-ready { background-color: #d4edda; }
+        .status-playing { background-color: #cce5ff; }
+        .status-paused { background-color: #fff3cd; }
+        .status-error { background-color: #f8d7da; }
         #log {
             margin-top: 20px;
             padding: 10px;
@@ -50,12 +61,30 @@
 <body>
     <div class="test-panel">
         <h1>IMF Decoder Test</h1>
+        
+        <!-- Status Display -->
+        <div class="status-panel">
+            <div class="status-item">
+                <span class="status-label">Player Status:</span>
+                <span id="player-status" class="status-value status-idle">Idle</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Decoder Status:</span>
+                <span id="decoder-status" class="status-value status-idle">Idle</span>
+            </div>
+        </div>
+
+        <!-- Control Buttons -->
         <div>
             <button id="verifyWasm" class="test-button">Verify WASM</button>
-            <button id="runTests" class="test-button" disabled>Run Tests</button>
+            <button id="initDecoder" class="test-button" disabled>Initialize Decoder</button>
+            <button id="startDecoder" class="test-button" disabled>Start Decoder</button>
+            <button id="processFrame" class="test-button" disabled>Process Frame</button>
+            <button id="pauseDecoder" class="test-button" disabled>Pause Decoder</button>
             <button id="clearLog" class="test-button">Clear Log</button>
         </div>
-        <div id="status"></div>
+
+        <!-- Debug Output -->
         <div id="log"></div>
     </div>
 </body>
