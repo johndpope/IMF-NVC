@@ -4,7 +4,10 @@ import {
     MessageType, 
     DecoderConfig,
     WorkerMessage, 
-    ReferenceData 
+    ReferenceData,
+    FrameStats,
+    ModelInputConfig,
+    FrameData
 } from '../types';
 
 export class IMFPlayer {
@@ -13,12 +16,29 @@ export class IMFPlayer {
     private model: tf.GraphModel | null = null;
     private callbacks: Map<MessageType, Function>;
     private config: DecoderConfig;
+    private frameBuffer: FrameData[] = [];
+    private frameIndex: number = 0;
+    private readonly bufferSize: number = 30;
+    private modelConfig: ModelInputConfig;
+    private lastProcessedFrame: tf.Tensor | null = null;
+    private frameCallback: ((stats: FrameStats) => void) | null = null;
+    private errorCallback: ((error: Error) => void) | null = null;
+    private lastFrameTime: number = 0;
 
     constructor(config: DecoderConfig) {
         this.config = config;
         this.callbacks = new Map();
         this.worker = new Worker(new URL('./decoder.worker.ts', import.meta.url));
+        this.modelConfig = {
+            inputShape: [1, config.height, config.width, 3],
+            inputNormalization: {
+                mean: [0.485, 0.456, 0.406],
+                std: [0.229, 0.224, 0.225]
+            },
+            maxBatchSize: 1
+        };
         this.setupWorkerListeners();
+        this.initialize();
     }
 
     private setupWorkerListeners() {
@@ -32,7 +52,7 @@ export class IMFPlayer {
             }
 
             if (error) {
-                console.error('Decoder error:', error);
+                this.handleDecoderError(error);
                 return;
             }
 
@@ -40,8 +60,17 @@ export class IMFPlayer {
                 case MessageType.DecoderCreated:
                     this.status = PlayerStatus.Ready;
                     break;
-                // Add other message handlers
+                case MessageType.FrameProcessed:
+                    this.handleFrameProcessed(data);
+                    break;
+                case MessageType.DecoderRecovered:
+                    this.handleDecoderRecovery(data);
+                    break;
             }
+        };
+
+        this.worker.onerror = (error) => {
+            this.handleDecoderError(error);
         };
     }
 
@@ -77,7 +106,6 @@ export class IMFPlayer {
     }
 
     private createReferenceData(): ReferenceData {
-        // Create reference tensors
         const features = [
             tf.zeros([1, 128, 64, 64]),
             tf.zeros([1, 256, 32, 32]),
@@ -87,7 +115,6 @@ export class IMFPlayer {
 
         const token = tf.zeros([1, 32]);
 
-        // Convert to the format expected by the decoder
         return {
             features: features.map(tensor => ({
                 tensor: tensor.dataSync() as Float32Array,
@@ -97,38 +124,205 @@ export class IMFPlayer {
         };
     }
 
-    async processFrame(inputData: Float32Array, inputShape: number[]): Promise<void> {
-        if (!this.model || this.status !== PlayerStatus.Playing) {
-            return;
-        }
-
+    private async getNextFrameData(): Promise<FrameData> {
         try {
-            const inputTensor = tf.tensor(inputData, inputShape);
-            const outputTensor = await this.model.executeAsync(inputTensor);
-            const outputData = await (outputTensor as tf.Tensor).data();
+            if (this.lastProcessedFrame) {
+                this.lastProcessedFrame.dispose();
+                this.lastProcessedFrame = null;
+            }
 
-            return new Promise((resolve) => {
-                this.callbacks.set(MessageType.TokensProcessed, resolve);
-                
-                this.worker.postMessage({
-                    type: MessageType.TokensProcessed,
-                    data: [{
-                        token: Array.from(outputData),
-                        frame_index: 0
-                    }]
-                });
-            });
+            const inputTensor = await this.prepareInputTensor();
+            const startTime = performance.now();
+            const outputTensor = await this.model!.executeAsync(inputTensor) as tf.Tensor;
+            const inferenceTime = performance.now() - startTime;
+            const processedData = await this.processModelOutput(outputTensor);
+            
+            inputTensor.dispose();
+            outputTensor.dispose();
+
+            this.frameIndex = (this.frameIndex + 1) % this.bufferSize;
+
+            return {
+                frameIndex: this.frameIndex,
+                timestamp: Date.now(),
+                data: processedData,
+                metadata: {
+                    inferenceTime,
+                    inputShape: this.modelConfig.inputShape,
+                    outputShape: processedData.shape
+                }
+            };
         } catch (error) {
-            console.error('Error processing frame:', error);
-            throw error;
+            console.error('Error getting next frame:', error);
+            throw new Error(`Frame processing failed: ${error}`);
         }
     }
 
-    destroy() {
+    private async processFrame(): Promise<void> {
+        if (!this.model || this.status !== PlayerStatus.Playing) return;
+
+        try {
+            const frameData = await this.getNextFrameData();
+            this.worker.postMessage({
+                type: MessageType.ProcessFrame,
+                data: [{
+                    token: Array.from(frameData.data.values),
+                    frame_index: frameData.frameIndex
+                }]
+            });
+        } catch (error) {
+            this.handleDecoderError(error);
+        }
+    }
+
+    private handleFrameProcessed(data: any) {
+        if (this.frameCallback) {
+            this.frameCallback(data.frameStats);
+        }
+
+        if (this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private handleDecoderError(error: any) {
+        console.error('Decoder error:', error);
+        if (this.errorCallback) {
+            this.errorCallback(new Error(String(error)));
+        }
+    }
+
+    private handleDecoderRecovery(data: any) {
+        console.log('Decoder recovered:', data);
+        if (data.success && this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private requestNextFrame() {
+        const now = performance.now();
+        const timeSinceLastFrame = now - this.lastFrameTime;
+
+        if (timeSinceLastFrame >= 16.67) { // Target 60fps
+            this.processFrame();
+            this.lastFrameTime = now;
+        } else {
+            setTimeout(() => this.requestNextFrame(), 16.67 - timeSinceLastFrame);
+        }
+    }
+
+    public setModelConfig(config: Partial<ModelInputConfig>) {
+        this.modelConfig = {
+            ...this.modelConfig,
+            ...config
+        };
+    }
+
+    public getBufferStatus(): {current: number, total: number} {
+        return {
+            current: this.frameBuffer.length,
+            total: this.bufferSize
+        };
+    }
+
+    public onFrameProcessed(callback: (stats: FrameStats) => void) {
+        this.frameCallback = callback;
+    }
+
+    public onError(callback: (error: Error) => void) {
+        this.errorCallback = callback;
+    }
+
+    public async start() {
+        if (this.status !== PlayerStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+        await this.preloadFrames();
+        this.status = PlayerStatus.Playing;
+        this.requestNextFrame();
+    }
+
+    public stop() {
+        this.status = PlayerStatus.Ready;
+    }
+
+    public async destroy() {
+        this.stop();
+        await this.cleanupResources();
         if (this.model) {
             this.model.dispose();
         }
         this.worker.terminate();
         this.status = PlayerStatus.Destroyed;
+    }
+
+    // Additional helper methods
+    private async prepareInputTensor(): Promise<tf.Tensor> {
+        return tf.tidy(() => {
+            let inputTensor = tf.randomNormal(this.modelConfig.inputShape);
+            if (this.modelConfig.inputNormalization) {
+                const { mean, std } = this.modelConfig.inputNormalization;
+                inputTensor = tf.sub(inputTensor, mean);
+                inputTensor = tf.div(inputTensor, std);
+            }
+            if (inputTensor.shape[0] !== 1) {
+                inputTensor = tf.expandDims(inputTensor, 0);
+            }
+            this.lastProcessedFrame = inputTensor;
+            return inputTensor;
+        });
+    }
+
+    private async processModelOutput(outputTensor: tf.Tensor): Promise<tf.TensorBuffer<tf.Rank>> {
+        const outputData = await outputTensor.buffer();
+        await this.applyPostProcessing(outputData);
+        return outputData;
+    }
+
+    private async applyPostProcessing(data: tf.TensorBuffer<tf.Rank>): Promise<void> {
+        tf.tidy(() => {
+            if (this.modelConfig.outputDenormalization) {
+                const { scale, offset } = this.modelConfig.outputDenormalization;
+                for (let i = 0; i < data.size; i++) {
+                    const value = data.values[i];
+                    data.values[i] = value * scale + offset;
+                }
+            }
+            for (let i = 0; i < data.size; i++) {
+                data.values[i] = Math.max(0, Math.min(1, data.values[i]));
+            }
+        });
+    }
+
+    private async cleanupResources(): Promise<void> {
+        await this.clearBuffer();
+        if (this.lastProcessedFrame) {
+            this.lastProcessedFrame.dispose();
+            this.lastProcessedFrame = null;
+        }
+        tf.engine().startScope();
+        tf.engine().endScope();
+    }
+
+    public async preloadFrames(count: number = this.bufferSize): Promise<void> {
+        for (let i = 0; i < count; i++) {
+            try {
+                const frameData = await this.getNextFrameData();
+                this.frameBuffer.push(frameData);
+            } catch (error) {
+                console.error(`Failed to preload frame ${i}:`, error);
+                break;
+            }
+        }
+    }
+
+    public async clearBuffer(): Promise<void> {
+        this.frameBuffer.forEach(frame => {
+            if (frame.data instanceof tf.Tensor) {
+                frame.data.dispose();
+            }
+        });
+        this.frameBuffer = [];
+        this.frameIndex = 0;
     }
 }

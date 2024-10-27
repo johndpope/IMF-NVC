@@ -1,5 +1,5 @@
 // js/types/index.ts
-
+import * as tf from '@tensorflow/tfjs';
 // Enums
 export enum PlayerStatus {
   Idle = 0,
@@ -18,17 +18,7 @@ export enum DecoderStatus {
   Closed = 5
 }
 
-export enum MessageType {
-  DecoderCreated = 'DecoderCreated',
-  DecoderInit = 'DecoderInit',
-  DecoderInited = 'DecoderInited',
-  WasmLoaded = 'WasmLoaded',
-  DecoderReady = 'DecoderReady',
-  ReferenceDataSet = 'ReferenceDataSet',
-  TokensProcessed = 'TokensProcessed',
-  BatchProcessed = 'BatchProcessed',
-  Error = 'Error'
-}
+
 
 // Configuration Interfaces
 export interface DecoderConfig {
@@ -36,6 +26,7 @@ export interface DecoderConfig {
   height: number;
   maxQueueSize?: number;
   batchSize?: number;
+  enablePerfMonitoring?: boolean;
 }
 
 // Data Structure Interfaces 
@@ -89,4 +80,81 @@ export interface WorkerMessage {
   type: MessageType;
   data?: any;
   error?: string;
+}
+
+
+export enum MessageType {
+  DecoderInit = 'DecoderInit',
+  DecoderInited = 'DecoderInited',
+  ProcessFrame = 'ProcessFrame',
+  FrameProcessed = 'FrameProcessed',
+  UpdateRenderPass = 'UpdateRenderPass',
+  DecoderError = 'DecoderError',
+  DecoderRecovered = 'DecoderRecovered',
+  DecoderMetrics = 'DecoderMetrics',
+  DecoderCreated = 'DecoderCreated',
+  WasmLoaded = 'WasmLoaded',
+  DecoderReady = 'DecoderReady',
+  ReferenceDataSet = 'ReferenceDataSet',
+  TokensProcessed = 'TokensProcessed',
+  BatchProcessed = 'BatchProcessed',
+  Error = 'Error'
+}
+
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
+  error?: string;
+}
+
+export interface FrameStats {
+  frameTime: number;        // Time to process frame
+  gpuTime: number;         // GPU processing time
+  frameCount: number;      // Total frames processed
+  droppedFrames: number;   // Frames exceeding timing budget
+  lastFrameTimestamp: number;
+}
+
+export interface RenderPassConfig {
+  name: string;
+  format: GPUTextureFormat;
+  descriptors: {
+      colorAttachments: Array<{
+          clearValue: GPUColor;
+          loadOp: GPULoadOp;
+          storeOp: GPUStoreOp;
+      }>;
+  };
+}
+
+export interface TextureDescriptor {
+  id: number;
+  width: number;
+  height: number;
+  format: GPUTextureFormat;
+  usage: GPUTextureUsageFlags;
+}
+
+export interface ModelInputConfig {
+  inputShape: number[];
+  inputNormalization?: {
+      mean: number[];
+      std: number[];
+  };
+  outputDenormalization?: {
+      scale: number;
+      offset: number;
+  };
+  maxBatchSize: number;
+}
+
+export interface FrameData {
+  frameIndex: number;
+  timestamp: number;
+  data: tf.TensorBuffer<tf.Rank>;
+  metadata: {
+      inferenceTime: number;
+      inputShape: number[];
+      outputShape: number[];
+  };
 }
