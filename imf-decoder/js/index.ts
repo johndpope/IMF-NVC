@@ -9,8 +9,8 @@ import {
     DecoderStatus 
 } from './types';
 import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
-
-
+import { logInterceptor, LogInterceptor } from './log-interceptor';
+import '../styles/styles.css';
 
 class TestUI {
     private decoder: IMFDecoder | null = null;
@@ -19,6 +19,7 @@ class TestUI {
     private animationFrameId: number | null = null;
     private frameCount: number = 0;
     private canvas: HTMLCanvasElement | null = null;
+    private logInterceptor: LogInterceptor;
 
     private buttons!: {
         verify: HTMLButtonElement;
@@ -35,178 +36,44 @@ class TestUI {
     };
 
     constructor() {
-        this.setupLayout();
+        this.logInterceptor = logInterceptor;
         this.initializeElements();
         this.setupEventListeners();
         this.interceptConsole();
-    }
-
-    private setupLayout() {
-        document.body.innerHTML = `
-        <div class="container">
-            <div class="left-panel">
-                <h1>IMF Decoder Test</h1>
-                <div class="status-panel">
-                    <div class="status-item">
-                        <span class="status-label">Player Status:</span>
-                        <span id="player-status" class="status-value status-idle">Idle</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Decoder Status:</span>
-                        <span id="decoder-status" class="status-value status-idle">Idle</span>
-                    </div>
-                </div>
-                <canvas id="decoder-canvas"></canvas>
-                <div class="button-group">
-                    <button id="verifyWasm">Verify WASM</button>
-                    <button id="initDecoder" disabled>Initialize Decoder</button>
-                    <button id="startDecoder" disabled>Start Decoder</button>
-                    <button id="processFrame" disabled>Process Frame</button>
-                    <button id="pauseDecoder" disabled>Pause Decoder</button>
-                    <button id="clearLog">Clear Log</button>
-                </div>
-            </div>
-            <div class="right-panel">
-                <div class="log-header">
-                    <h2>Decoder Log</h2>
-                </div>
-                <div id="log" class="log-content"></div>
-            </div>
-        </div>
-    `;
-
-        const style = document.createElement('style');
-        style.textContent = `
-         #decoder-canvas {
-            display: block;
-            margin: 20px auto;
-            max-width: 100%;
-            height: auto;
-            border: 1px solid #ccc;
-        }
-            .container {
-                display: flex;
-                gap: 20px;
-                padding: 20px;
-                max-width: 1400px;
-                margin: 0 auto;
-                height: calc(100vh - 40px);
-            }
-
-            .left-panel {
-                flex: 1;
-                min-width: 400px;
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-            }
-
-            .right-panel {
-                flex: 1;
-                min-width: 400px;
-                display: flex;
-                flex-direction: column;
-                border-left: 1px solid #ccc;
-                padding-left: 20px;
-            }
-
-            .status-panel {
-                background: #f8f9fa;
-                padding: 15px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-
-            .status-item {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 10px;
-            }
-
-            .status-label {
-                font-weight: bold;
-            }
-
-            .status-value {
-                padding: 4px 12px;
-                border-radius: 12px;
-                font-size: 14px;
-            }
-
-            .status-idle { background: #ffd700; }
-            .status-ready { background: #90ee90; }
-            .status-playing { background: #87ceeb; }
-            .status-paused { background: #ffb6c1; }
-
-            #decoder-canvas {
-                width: 100%;
-                max-width: 640px;
-                height: auto;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                margin: 0 auto;
-            }
-
-            .button-group {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-                gap: 10px;
-            }
-
-            button {
-                padding: 10px;
-                border: none;
-                border-radius: 4px;
-                background: #4285f4;
-                color: white;
-                cursor: pointer;
-                transition: background 0.2s;
-            }
-
-            button:hover:not(:disabled) {
-                background: #3367d6;
-            }
-
-            button:disabled {
-                background: #ccc;
-                cursor: not-allowed;
-            }
-
-            .log-header {
-                padding: 10px 0;
-                border-bottom: 1px solid #eee;
-                margin-bottom: 10px;
-            }
-
-            .log-content {
-                flex: 1;
-                overflow-y: auto;
-                background: #f8f9fa;
-                padding: 10px;
-                border-radius: 4px;
-                font-family: monospace;
-                font-size: 13px;
-                line-height: 1.5;
-            }
-
-            .info { color: #4285f4; }
-            .error { color: #dc3545; }
-            .success { color: #28a745; }
-
-            h1, h2 {
-                margin: 0 0 20px 0;
-                color: #333;
-            }
-        `;
-        document.head.appendChild(style);
-
-        // Setup canvas after layout
+        
+        // Initialize canvas
         this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
         if (this.canvas) {
             this.canvas.width = 640;
             this.canvas.height = 480;
         }
+    }
+
+    private initializeElements() {
+        // Get all required DOM elements
+        const elements = {
+            verify: 'verifyWasm',
+            init: 'initDecoder',
+            start: 'startDecoder',
+            process: 'processFrame',
+            pause: 'pauseDecoder',
+            clear: 'clearLog',
+            playerStatus: 'player-status',
+            decoderStatus: 'decoder-status'
+        };
+
+        // Initialize buttons
+        this.buttons = Object.entries(elements).slice(0, 6).reduce((acc, [key, id]) => {
+            const element = document.getElementById(id);
+            if (!element) throw new Error(`Button ${id} not found`);
+            return { ...acc, [key]: element as HTMLButtonElement };
+        }, {}) as typeof this.buttons;
+
+        // Initialize status elements
+        this.statusElements = {
+            player: document.getElementById(elements.playerStatus) || throwError(elements.playerStatus),
+            decoder: document.getElementById(elements.decoderStatus) || throwError(elements.decoderStatus)
+        };
     }
 
     private async checkWebGPUSupport(): Promise<boolean> {
@@ -241,37 +108,6 @@ class TestUI {
     
     
 
-
-    private initializeElements() {
-        // Verify all elements exist before assignment
-        const verifyBtn = document.getElementById('verifyWasm');
-        const initBtn = document.getElementById('initDecoder');
-        const startBtn = document.getElementById('startDecoder');
-        const processBtn = document.getElementById('processFrame');
-        const pauseBtn = document.getElementById('pauseDecoder');
-        const clearBtn = document.getElementById('clearLog');
-        const playerStatus = document.getElementById('player-status');
-        const decoderStatus = document.getElementById('decoder-status');
-
-        if (!verifyBtn || !initBtn || !startBtn || !processBtn || 
-            !pauseBtn || !clearBtn || !playerStatus || !decoderStatus) {
-            throw new Error('Required DOM elements not found');
-        }
-
-        this.buttons = {
-            verify: verifyBtn as HTMLButtonElement,
-            init: initBtn as HTMLButtonElement,
-            start: startBtn as HTMLButtonElement,
-            process: processBtn as HTMLButtonElement,
-            pause: pauseBtn as HTMLButtonElement,
-            clear: clearBtn as HTMLButtonElement
-        };
-
-        this.statusElements = {
-            player: playerStatus,
-            decoder: decoderStatus
-        };
-    }
 
     private interceptConsole() {
         const originalLog = console.log;
@@ -621,6 +457,8 @@ class TestUI {
     }
 
     private clearLog() {
+        this.logInterceptor.clear();
+
         const logDiv = document.getElementById('log')!;
         logDiv.innerHTML = '';
     }
@@ -632,5 +470,10 @@ if (document.readyState === 'loading') {
 } else {
     new TestUI();
 }
+
+function throwError(id: string): never {
+    throw new Error(`Element ${id} not found`);
+}
+
 
 export { TestUI };

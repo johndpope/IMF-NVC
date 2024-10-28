@@ -64,11 +64,8 @@ module.exports = {
                     }
                 },
                 {
-                    from: 'styles',  // Assuming your CSS is in a 'styles' directory
-                    to: 'styles',
-                    globOptions: {
-                        ignore: ['**/*.map']
-                    }
+                    from: 'styles',
+                    to: 'styles'
                 }
             ]
         })
@@ -77,7 +74,9 @@ module.exports = {
         static: {
             directory: path.join(__dirname, 'dist'),
             watch: true,
-            serveIndex: true,
+            serveIndex: true
+        },
+        devMiddleware: {
             mimeTypes: {
                 'css': 'text/css'
             }
@@ -87,7 +86,7 @@ module.exports = {
         port: 8092,
         historyApiFallback: true,
         headers: {
-            'Access-Control-Allow-Origin': '*',
-        }
+            'Access-Control-Allow-Origin': '*'
+        },
     }
 };
