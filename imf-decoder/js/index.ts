@@ -371,16 +371,16 @@ class TestUI {
             this.canvas.width = 640;
             this.canvas.height = 480;
             
-            // Enable debug mode using the proper method
-            this.decoder.enable_debug_mode();
+    
 
             await this.decoder.load_frames("./frames/_0tf2n3rlJU_0");
     
             
-            // Verify debug mode is set
-            if (!this.decoder.is_debug_mode()) {
-                throw new Error('Failed to enable debug mode');
-            }
+            // // Verify debug mode is set
+            // this.decoder.enable_debug_mode();
+            // if (!this.decoder.is_debug_mode()) {
+            //     throw new Error('Failed to enable debug mode');
+            // }
             
             // Create and set reference data
             const referenceData = this.createReferenceData();
