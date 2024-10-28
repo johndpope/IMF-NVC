@@ -51,6 +51,9 @@ declare module '@pkg/imf_decoder' {
         disable_debug_mode(): void;
         is_debug_mode(): boolean;
         
+        // Frame loading method
+        load_frames(path: string): Promise<string>;
+        
         // Diagnostic mode property
         diagnostic_mode: boolean;
         

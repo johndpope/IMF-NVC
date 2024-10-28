@@ -12,7 +12,8 @@ module.exports = {
         path: path.resolve(__dirname, 'dist'),
         filename: '[name].js',
         clean: true,
-        webassemblyModuleFilename: "[hash].module.wasm"
+        webassemblyModuleFilename: "[hash].module.wasm",
+        publicPath: '/'
     },
     resolve: {
         extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm', '.css'],
@@ -46,7 +47,7 @@ module.exports = {
     },
     plugins: [
         new HtmlWebpackPlugin({
-            template: './index.html',  // Updated path
+            template: './index.html',
             filename: 'index.html',
         }),
         new WasmPackPlugin({
@@ -57,19 +58,31 @@ module.exports = {
         new CopyWebpackPlugin({
             patterns: [
                 {
-                    from: 'styles',  // Just the styles directory
+                    from: 'styles',
                     to: 'styles',
+                    noErrorOnMissing: true
+                },
+                {
+                    from: 'public/frames',
+                    to: 'frames',
                     noErrorOnMissing: true
                 }
             ]
         })
     ],
     devServer: {
-        static: {
-            directory: path.join(__dirname, 'dist'),
-            watch: true,
-            serveIndex: true
-        },
+        static: [
+            {
+                directory: path.join(__dirname, 'dist'),
+                watch: true,
+                serveIndex: true
+            },
+            {
+                directory: path.join(__dirname, 'public'),
+                watch: true,
+                serveIndex: true
+            }
+        ],
         devMiddleware: {
             mimeTypes: {
                 'css': 'text/css'

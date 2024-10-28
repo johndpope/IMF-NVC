@@ -48,3 +48,4 @@ public/test/group1-shard5of6.bin
 public/test/group1-shard6of6.bin
 *.bin
 imf-decoder/pnpm-lock.yaml
+imf-decoder/public/frames/*

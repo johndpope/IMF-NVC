@@ -1,5 +1,5 @@
 use wasm_bindgen::prelude::*;
-use web_sys::{HtmlCanvasElement, CanvasRenderingContext2d, ImageData};
+use web_sys::{ImageBitmap,HtmlImageElement,HtmlCanvasElement, CanvasRenderingContext2d, ImageData};
 use wasm_bindgen::JsCast;
 use serde::{Serialize, Deserialize};
 use log::{info, error, debug};
@@ -9,6 +9,9 @@ use std::cell::RefCell;
 use std::rc::Rc;
 // use web_sys::window;
 use wasm_bindgen::JsValue;
+use js_sys::Promise;
+use wasm_bindgen_futures::JsFuture;
+
 
 
 // Add this type alias to make the closure type more readable
@@ -29,6 +32,10 @@ pub struct IMFDecoder {
     last_frame_time: RefCell<f64>,
     max_frames: u64, 
     is_playing: RefCell<bool>,  // Added missing field
+    frames: RefCell<Vec<ImageBitmap>>, // Store loaded frames
+    current_frame: RefCell<usize>,     // Track current frame index
+    target_fps: u32,           // Added: Target frame rate
+    frame_interval: f64,       // Added: Target time between frames
 
 
 }
@@ -73,6 +80,9 @@ impl IMFDecoder {
         let _ = console_error_panic_hook::set_once();
         let _ = wasm_logger::init(wasm_logger::Config::default());
         
+        let target_fps = 30; // Set target FPS
+        let frame_interval = 1000.0 / target_fps as f64; // Calculate interval in ms
+       
         info!("Creating IMFDecoder with dimensions {}x{}", width, height);
 
         Ok(Self {
@@ -89,7 +99,11 @@ impl IMFDecoder {
             last_frame_time: RefCell::new(0.0),
             max_frames: 300,
             is_playing: RefCell::new(false),  // Initialize is_playing
-
+            frames: RefCell::new(Vec::new()),
+            current_frame: RefCell::new(0),
+            target_fps,
+            frame_interval,
+        
         })
     }
 
@@ -130,14 +144,139 @@ impl IMFDecoder {
         Ok(())
     }
     
+    #[wasm_bindgen]
+    pub async fn load_frames(&self, base_path: String) -> Result<String, JsValue> {
+        info!("Loading frames from {}", base_path);
+        let mut frames = Vec::new();
+        let mut loaded = 0;
+        let mut errors = 0;
+        
+        for batch_start in (0..102).step_by(10) {
+            let mut batch_futures = Vec::new();
+            
+            for i in batch_start..std::cmp::min(batch_start + 10, 102) {
+                // Create owned String for path
+                let path = format!("{}/{:06}.png", base_path, i);
+                batch_futures.push(self.load_single_frame(i, path));
+            }
+
+            for future in batch_futures {
+                match future.await {
+                    Ok((index, frame)) => {
+                        frames.push((index, frame));
+                        loaded += 1;
+                        
+                        if loaded % 10 == 0 {
+                            info!("Loaded {}/{} frames", loaded, 102);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to load frame: {:?}", e);
+                        errors += 1;
+                    }
+                }
+            }
+        }
+
+        if loaded == 0 {
+            return Err(JsValue::from_str("No frames were loaded successfully"));
+        }
+
+        frames.sort_by_key(|(idx, _)| *idx);
+        let frames = frames.into_iter().map(|(_, frame)| frame).collect();
+
+        *self.frames.borrow_mut() = frames;
+        *self.current_frame.borrow_mut() = 0;
+
+        Ok(format!("Successfully loaded {loaded} frames with {errors} errors"))
+    }
+
+    async fn load_single_frame(&self, index: usize, path: String) -> Result<(usize, ImageBitmap), JsValue> {
+        info!("Loading frame {} from path: {}", index, path);
+        let image = HtmlImageElement::new()?;
+        
+        let promise = Promise::new(&mut |resolve, reject| {
+            let img_load = image.clone();
+            let error_path = path.clone();
+            
+            let load_handler = Closure::once_into_js(move || {
+                resolve.call1(&JsValue::NULL, &img_load).unwrap();
+            });
+            
+            let error_handler = Closure::once_into_js(move || {
+                let msg = format!("Failed to load frame {} from {}", index, error_path);
+                reject.call1(&JsValue::NULL, &JsValue::from_str(&msg)).unwrap();
+            });
+
+            image.set_onload(Some(load_handler.as_ref().unchecked_ref()));
+            image.set_onerror(Some(error_handler.as_ref().unchecked_ref()));
+            image.set_src(&path);
+        });
+
+        let image_loaded = JsFuture::from(promise).await?;
+        let image_element = image_loaded.dyn_into::<HtmlImageElement>()?;
+        
+        let window = web_sys::window().unwrap();
+        let bitmap_promise = window
+            .create_image_bitmap_with_html_image_element(&image_element)?;
+        let bitmap = JsFuture::from(bitmap_promise).await?;
+        
+        Ok((index, bitmap.dyn_into::<ImageBitmap>()?))
+    }
+    // fn schedule_next_frame(&self) -> Result<(), JsValue> {
+    //     if *self.is_playing.borrow() {
+    //         if let Some(window) = web_sys::window() {
+    //             let this = self as *const IMFDecoder;
+                
+    //             let closure = Closure::once_into_js(move || {
+    //                 let decoder = unsafe { &*this };
+    //                 if *decoder.is_playing.borrow() {
+    //                     if let Err(e) = decoder.render_frame() {
+    //                         error!("Render error: {:?}", e);
+    //                         return;
+    //                     }
+                        
+    //                     let _ = decoder.schedule_next_frame();
+    //                 }
+    //             });
+    
+    //             let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+    //             *self.animation_id.borrow_mut() = Some(id);
+    //         }
+    //     }
+    //     Ok(())
+    // }
+
     fn schedule_next_frame(&self) -> Result<(), JsValue> {
         if *self.is_playing.borrow() {
             if let Some(window) = web_sys::window() {
                 let this = self as *const IMFDecoder;
+                let performance = window.performance().unwrap();
+                let current_time = performance.now();
+                let last_time = *self.last_frame_time.borrow();
+                
+                let elapsed = if last_time > 0.0 {
+                    current_time - last_time
+                } else {
+                    0.0
+                };
+
+                // Calculate delay needed to maintain target frame rate
+                let delay = if elapsed < self.frame_interval {
+                    (self.frame_interval - elapsed) as i32
+                } else {
+                    0
+                };
                 
                 let closure = Closure::once_into_js(move || {
                     let decoder = unsafe { &*this };
                     if *decoder.is_playing.borrow() {
+                        if let Some(window) = web_sys::window() {
+                            if let Some(perf) = window.performance() {
+                                *decoder.last_frame_time.borrow_mut() = perf.now();
+                            }
+                        }
+
                         if let Err(e) = decoder.render_frame() {
                             error!("Render error: {:?}", e);
                             return;
@@ -146,12 +285,34 @@ impl IMFDecoder {
                         let _ = decoder.schedule_next_frame();
                     }
                 });
-    
-                let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+
+                // If delay is needed, use setTimeout, otherwise request next frame immediately
+                let id = if delay > 0 {
+                    let _ = window.set_timeout_with_callback_and_timeout_and_arguments_0(
+                        closure.as_ref().unchecked_ref(),
+                        delay
+                    )?;
+                    0 // Placeholder ID for setTimeout
+                } else {
+                    window.request_animation_frame(closure.as_ref().unchecked_ref())?
+                };
+
                 *self.animation_id.borrow_mut() = Some(id);
             }
         }
         Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn set_target_fps(&mut self, fps: u32) {
+        self.target_fps = fps.max(1).min(60); // Clamp between 1 and 60 FPS
+        self.frame_interval = 1000.0 / self.target_fps as f64;
+        info!("Target FPS set to: {} (interval: {}ms)", self.target_fps, self.frame_interval);
+    }
+
+    #[wasm_bindgen]
+    pub fn get_target_fps(&self) -> u32 {
+        self.target_fps
     }
 
 
@@ -516,29 +677,33 @@ impl IMFDecoder {
         Ok(format!("Successfully processed {} tokens", token_count))
     }
 
-
-
     fn render_frame(&self) -> Result<(), JsValue> {
         if let Some(context) = &self.context {
-            // Generate frame data
-            let frame_data = self.generate_debug_pattern();
-            
-            // Create and render ImageData
-            let image_data = ImageData::new_with_u8_clamped_array_and_sh(
-                Clamped(&frame_data),
-                self.width,
-                self.height
-            )?;
-            
-            context.put_image_data(&image_data, 0.0, 0.0)?;
-            
-            // Update frame counter
-            let mut frame_count = self.frame_count.borrow_mut();
-            *frame_count = (*frame_count + 1) % self.max_frames;
+            if self.debug_mode {
+                let frame_data = self.generate_debug_pattern();
+                let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+                    Clamped(&frame_data),
+                    self.width,
+                    self.height
+                )?;
+                context.put_image_data(&image_data, 0.0, 0.0)?;
+            } else {
+                let frames = self.frames.borrow();
+                let current_frame = *self.current_frame.borrow();
+                
+                if let Some(frame) = frames.get(current_frame) {
+                    context.draw_image_with_image_bitmap(frame, 0.0, 0.0)?;
+                    *self.current_frame.borrow_mut() = (current_frame + 1) % frames.len();
+                }
+            }
+
+            *self.frame_count.borrow_mut() += 1;
         }
         Ok(())
     }
 
+
+    
     fn update_metrics(&self) {
         // if let Some(window) = web_sys::window() {
         //     if let Some(performance) = window.performance() {

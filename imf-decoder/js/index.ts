@@ -373,6 +373,9 @@ class TestUI {
             
             // Enable debug mode using the proper method
             this.decoder.enable_debug_mode();
+
+            await this.decoder.load_frames("./frames/_0tf2n3rlJU_0");
+    
             
             // Verify debug mode is set
             if (!this.decoder.is_debug_mode()) {
@@ -388,6 +391,10 @@ class TestUI {
             const initResult = await this.decoder.initialize_render_context(this.canvas);
             this.log('info', `Render context initialized: ${initResult}`);
     
+
+            const result = await this.decoder.load_frames("/frames/_0tf2n3rlJU_0/");
+            console.log("Frames loaded:", result);
+
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);
             this.log('success', 'Decoder initialized successfully in debug mode');
