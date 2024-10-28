@@ -8,7 +8,6 @@ import {
     PlayerStatus,
     DecoderStatus 
 } from './types';
-import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
 import { logInterceptor, LogInterceptor } from './log-interceptor';
 import '../styles/styles.css';
 
@@ -20,6 +19,7 @@ class TestUI {
     private frameCount: number = 0;
     private canvas: HTMLCanvasElement | null = null;
     private logInterceptor: LogInterceptor;
+    private debugMetricsInterval: number | null = null;
 
     private buttons!: {
         verify: HTMLButtonElement;
@@ -28,11 +28,17 @@ class TestUI {
         process: HTMLButtonElement;
         pause: HTMLButtonElement;
         clear: HTMLButtonElement;
+        enableDebug: HTMLButtonElement;
+        disableDebug: HTMLButtonElement;
     };
 
     private statusElements!: {
         player: HTMLElement;
         decoder: HTMLElement;
+        debugMode: HTMLElement;
+        frameCount: HTMLElement;
+        frameTime: HTMLElement;
+        queueSize: HTMLElement;
     };
 
     constructor() {
@@ -40,6 +46,7 @@ class TestUI {
         this.initializeElements();
         this.setupEventListeners();
         this.interceptConsole();
+        this.setupDebugPanel();
         
         // Initialize canvas
         this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
@@ -47,6 +54,101 @@ class TestUI {
             this.canvas.width = 640;
             this.canvas.height = 480;
         }
+    }
+
+    private setupDebugPanel() {
+        // Create debug panel container
+        const debugPanel = document.createElement('div');
+        debugPanel.className = 'debug-panel';
+        debugPanel.innerHTML = `
+            <div class="debug-header">Debug Controls</div>
+            <div class="debug-content">
+                <div class="debug-section">
+                    <div class="debug-row">
+                        <span>Debug Mode:</span>
+                        <span id="debug-mode-status">Disabled</span>
+                    </div>
+                    <div class="debug-controls">
+                        <button id="enableDebug">Enable Debug</button>
+                        <button id="disableDebug">Disable Debug</button>
+                    </div>
+                </div>
+                <div class="debug-section">
+                    <div class="debug-row">
+                        <span>Frame Count:</span>
+                        <span id="frame-count">0</span>
+                    </div>
+                    <div class="debug-row">
+                        <span>Frame Time:</span>
+                        <span id="frame-time">0 ms</span>
+                    </div>
+                    <div class="debug-row">
+                        <span>Queue Size:</span>
+                        <span id="queue-size">0</span>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Add debug panel to document
+        document.body.appendChild(debugPanel);
+
+        // Add styles
+        const style = document.createElement('style');
+        style.textContent = `
+            .debug-panel {
+                position: fixed;
+                right: 0;
+                top: 0;
+                width: 300px;
+                height: 100%;
+                background: #1a1a1a;
+                color: #fff;
+                padding: 20px;
+                box-shadow: -2px 0 5px rgba(0,0,0,0.2);
+                overflow-y: auto;
+            }
+            .debug-header {
+                font-size: 18px;
+                font-weight: bold;
+                margin-bottom: 20px;
+                border-bottom: 1px solid #333;
+                padding-bottom: 10px;
+            }
+            .debug-section {
+                margin-bottom: 20px;
+                background: #2a2a2a;
+                padding: 15px;
+                border-radius: 4px;
+            }
+            .debug-row {
+                display: flex;
+                justify-content: space-between;
+                margin-bottom: 10px;
+            }
+            .debug-controls {
+                display: flex;
+                gap: 10px;
+                margin-top: 10px;
+            }
+            .debug-controls button {
+                flex: 1;
+                padding: 8px;
+                border: none;
+                border-radius: 4px;
+                cursor: pointer;
+                background: #444;
+                color: white;
+                transition: background 0.2s;
+            }
+            .debug-controls button:hover {
+                background: #555;
+            }
+            #main-content {
+                margin-right: 300px;
+            }
+        `;
+        document.head.appendChild(style);
     }
 
     private initializeElements() {
@@ -58,12 +160,18 @@ class TestUI {
             process: 'processFrame',
             pause: 'pauseDecoder',
             clear: 'clearLog',
+            enableDebug: 'enableDebug',
+            disableDebug: 'disableDebug',
             playerStatus: 'player-status',
-            decoderStatus: 'decoder-status'
+            decoderStatus: 'decoder-status',
+            debugMode: 'debug-mode-status',
+            frameCount: 'frame-count',
+            frameTime: 'frame-time',
+            queueSize: 'queue-size'
         };
 
         // Initialize buttons
-        this.buttons = Object.entries(elements).slice(0, 6).reduce((acc, [key, id]) => {
+        this.buttons = Object.entries(elements).slice(0, 8).reduce((acc, [key, id]) => {
             const element = document.getElementById(id);
             if (!element) throw new Error(`Button ${id} not found`);
             return { ...acc, [key]: element as HTMLButtonElement };
@@ -72,8 +180,63 @@ class TestUI {
         // Initialize status elements
         this.statusElements = {
             player: document.getElementById(elements.playerStatus) || throwError(elements.playerStatus),
-            decoder: document.getElementById(elements.decoderStatus) || throwError(elements.decoderStatus)
+            decoder: document.getElementById(elements.decoderStatus) || throwError(elements.decoderStatus),
+            debugMode: document.getElementById(elements.debugMode) || throwError(elements.debugMode),
+            frameCount: document.getElementById(elements.frameCount) || throwError(elements.frameCount),
+            frameTime: document.getElementById(elements.frameTime) || throwError(elements.frameTime),
+            queueSize: document.getElementById(elements.queueSize) || throwError(elements.queueSize)
         };
+    }
+
+    private setupEventListeners() {
+        this.buttons.verify.onclick = () => this.verifyWasm();
+        this.buttons.init.onclick = () => this.initializeDecoder();
+        this.buttons.start.onclick = () => this.startDecoder();
+        this.buttons.process.onclick = () => this.processFrame();
+        this.buttons.pause.onclick = () => this.pauseDecoder();
+        this.buttons.clear.onclick = () => this.clearLog();
+        this.buttons.enableDebug.onclick = () => this.enableDebug();
+        this.buttons.disableDebug.onclick = () => this.disableDebug();
+    }
+
+    private enableDebug() {
+        if (this.decoder) {
+            this.decoder.enable_debug_mode();
+            this.statusElements.debugMode.textContent = 'Enabled';
+            this.startDebugMetrics();
+            this.log('info', 'Debug mode enabled');
+        }
+    }
+
+    private disableDebug() {
+        if (this.decoder) {
+            this.decoder.disable_debug_mode();
+            this.statusElements.debugMode.textContent = 'Disabled';
+            this.stopDebugMetrics();
+            this.log('info', 'Debug mode disabled');
+        }
+    }
+
+    private startDebugMetrics() {
+        if (this.debugMetricsInterval) return;
+        
+        this.debugMetricsInterval = window.setInterval(() => {
+            if (this.decoder) {
+                const status = this.decoder.get_status();
+                if (typeof status === 'object') {
+                    this.statusElements.frameCount.textContent = status.metrics?.frameCount?.toString() || '0';
+                    this.statusElements.frameTime.textContent = `${(status.metrics?.lastFrameTime || 0).toFixed(2)} ms`;
+                    this.statusElements.queueSize.textContent = status.queue?.inputQueueSize?.toString() || '0';
+                }
+            }
+        }, 16.67); // ~60fps update rate
+    }
+
+    private stopDebugMetrics() {
+        if (this.debugMetricsInterval) {
+            window.clearInterval(this.debugMetricsInterval);
+            this.debugMetricsInterval = null;
+        }
     }
 
     private async checkWebGPUSupport(): Promise<boolean> {
@@ -132,14 +295,6 @@ class TestUI {
 
 
 
-    private setupEventListeners() {
-        this.buttons.verify.onclick = () => this.verifyWasm();
-        this.buttons.init.onclick = () => this.initializeDecoder();
-        this.buttons.start.onclick = () => this.startDecoder();
-        this.buttons.process.onclick = () => this.processFrame();
-        this.buttons.pause.onclick = () => this.pauseDecoder();
-        this.buttons.clear.onclick = () => this.clearLog();
-    }
 
     private updateStatus(type: 'player' | 'decoder', status: PlayerStatus | DecoderStatus) {
         const element = this.statusElements[type];
@@ -315,86 +470,6 @@ class TestUI {
         }
     }
 
-    // private async startDecoderLoop() {
-    //     if (!this.decoder || !this.canvas) return;
-
-    //     const frameWidth = 640;
-    //     const frameHeight = 480;
-    //     const channelCount = 4; // RGBA
-        
-    //     const animate = async () => {
-    //         try {
-    //             // Create test frame data with changing pattern
-    //             const frame = new Float32Array(frameWidth * frameHeight * channelCount);
-                
-    //             // Create a simple animation pattern
-    //             const time = this.frameCount * 0.05;
-    //             for (let y = 0; y < frameHeight; y++) {
-    //                 for (let x = 0; x < frameWidth; x++) {
-    //                     const i = (y * frameWidth + x) * channelCount;
-    //                     // Create animated gradient pattern
-    //                     frame[i] = (Math.sin(x * 0.01 + time) + 1) * 0.5; // R
-    //                     frame[i + 1] = (Math.cos(y * 0.01 + time) + 1) * 0.5; // G
-    //                     frame[i + 2] = (Math.sin((x + y) * 0.01 + time) + 1) * 0.5; // B
-    //                     frame[i + 3] = 1.0; // A
-    //                 }
-    //             }
-
-    //             const token: FrameToken = {
-    //                 token: frame,
-    //                 frame_index: this.frameCount++
-    //             };
-
-    //             // Process frame through decoder
-    //             await this.decoder.process_tokens([token]);
-    //             await this.decoder.process_batch();
-
-    //             // Request next frame if still playing
-    //             if (this.decoderStatus === DecoderStatus.Open) {
-    //                 this.animationFrameId = requestAnimationFrame(animate);
-    //             }
-
-    //             // Log frame stats every 60 frames
-    //             if (this.frameCount % 60 === 0) {
-    //                 const stats = await this.decoder.get_status();
-    //                 this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(stats)}`);
-    //             }
-
-    //         } catch (error) {
-    //             this.log('error', `Animation error: ${error}`);
-    //             this.pauseDecoder();
-    //         }
-    //     };
-
-    //     // Start animation loop
-    //     this.animationFrameId = requestAnimationFrame(animate);
-    // }
-
-    // private async startDecoder() {
-    //     try {
-    //         this.buttons.start.disabled = true;
-    //         this.updateStatus('decoder', DecoderStatus.Open);
-            
-    //         if (!this.decoder) {
-    //             throw new Error('Decoder not initialized');
-    //         }
-
-    //         // Enable frame processing and pause buttons
-    //         this.buttons.process.disabled = false;
-    //         this.buttons.pause.disabled = false;
-            
-    //         // Start the decoder's internal render loop
-    //         await this.decoder.start_player_loop();
-            
-    //         // Start our animation loop
-    //         this.startDecoderLoop();
-            
-    //         this.log('success', 'Decoder started');
-    //     } catch (error:any) {
-    //         this.log('error', `Start error: ${error.message}`);
-    //         this.updateStatus('decoder', DecoderStatus.Ready);
-    //     }
-    // }
 
     private async pauseDecoder() {
         try {

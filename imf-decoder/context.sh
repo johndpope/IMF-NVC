@@ -12,7 +12,7 @@ dump rs
 mv src.combined ..
 cd ..
 tree -I 'node_modules|target|dist|pkg' -L 2 > tree.txt
-cat js.combined src.combined tree.txt > project.txt
+cat js.combined src.combined tree.txt webpack.config.js package.json > project.txt
 
 rm src.combined
 rm js.combined

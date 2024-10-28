@@ -543,7 +543,17 @@ declare module '@pkg/imf_decoder' {
         get_status(): DecoderStatus;
         start_player_loop(): Promise<void>;
         stop_player_loop(): void;
+        
+        // Debug mode methods
+        debug_mode: boolean;
+        enable_debug_mode(): void;
+        disable_debug_mode(): void;
+        is_debug_mode(): boolean;
+        
+        // Diagnostic mode property
         diagnostic_mode: boolean;
+        
+        // Other methods
         set_reference_data(data: ReferenceData): Promise<string>;
         process_tokens(tokens: FrameToken[]): Promise<string>;
         process_batch(): Promise<string>;
@@ -1121,6 +1131,118 @@ Active Tensors: ${averages.tensorCount}
         this.lastFrameTime = 0;
     }
 }
+class LogInterceptor {
+    private logElement: HTMLElement;
+    private maxLogEntries: number = 1000;
+
+    constructor() {
+        this.logElement = document.getElementById('log') || document.createElement('div');
+        this.setupConsoleInterceptor();
+    }
+
+    private setupConsoleInterceptor() {
+        const originalConsole = {
+            log: console.log,
+            info: console.info,
+            warn: console.warn,
+            error: console.error,
+            debug: console.debug
+        };
+
+        // Intercept console methods
+        console.log = (...args: any[]) => {
+            this.addLogEntry('log', ...args);
+            originalConsole.log.apply(console, args);
+        };
+
+        console.info = (...args: any[]) => {
+            this.addLogEntry('info', ...args);
+            originalConsole.info.apply(console, args);
+        };
+
+        console.warn = (...args: any[]) => {
+            this.addLogEntry('warn', ...args);
+            originalConsole.warn.apply(console, args);
+        };
+
+        console.error = (...args: any[]) => {
+            this.addLogEntry('error', ...args);
+            originalConsole.error.apply(console, args);
+        };
+
+        console.debug = (...args: any[]) => {
+            this.addLogEntry('debug', ...args);
+            originalConsole.debug.apply(console, args);
+        };
+    }
+
+    private formatMessage(args: any[]): string {
+        return args.map(arg => {
+            if (typeof arg === 'string') {
+                return this.formatString(arg);
+            }
+            if (arg instanceof Error) {
+                return `${arg.name}: ${arg.message}\n${arg.stack}`;
+            }
+            return typeof arg === 'object' ? JSON.stringify(arg, null, 2) : String(arg);
+        }).join(' ');
+    }
+
+    private formatString(str: string): string {
+        // Handle special formatting
+        return str
+            .replace(/\%c/g, '') // Remove CSS formatting placeholders
+            .replace(/src\/wasm\/bindings\.rs:(\d+)/g, '<span class="log-file">src/wasm/bindings.rs:$1</span>')
+            .replace(/(DEBUG|INFO|WARN|ERROR)/g, '<span class="log-level log-$1">$1</span>')
+            .replace(/Token data length: (\d+)/g, '<span class="log-token">Token data length: $1</span>')
+            .replace(/Frame data length: (\d+)/g, '<span class="log-frame">Frame data length: $1</span>')
+            .replace(/WASM (Exports|verification)/g, '<span class="log-wasm">WASM $1</span>');
+    }
+
+    private addLogEntry(level: string, ...args: any[]) {
+        const entry = document.createElement('div');
+        entry.className = `log-entry log-${level}`;
+
+        // Add timestamp
+        const timestamp = document.createElement('span');
+        timestamp.className = 'log-timestamp';
+        timestamp.textContent = new Date().toISOString().split('T')[1].split('.')[0];
+        entry.appendChild(timestamp);
+
+        // Add level indicator
+        const levelIndicator = document.createElement('span');
+        levelIndicator.className = `log-level log-${level}`;
+        levelIndicator.textContent = level.toUpperCase();
+        entry.appendChild(levelIndicator);
+
+        // Add message
+        const message = document.createElement('span');
+        message.className = 'log-message';
+        message.innerHTML = this.formatMessage(args);
+        entry.appendChild(message);
+
+        // Add to log and scroll
+        this.logElement.appendChild(entry);
+        this.trimOldEntries();
+        this.logElement.scrollTop = this.logElement.scrollHeight;
+    }
+
+    private trimOldEntries() {
+        while (this.logElement.children.length > this.maxLogEntries) {
+            this.logElement.removeChild(this.logElement.firstChild!);
+        }
+    }
+
+    clear() {
+        this.logElement.innerHTML = '';
+    }
+}
+
+// Initialize the log interceptor
+const logInterceptor = new LogInterceptor();
+
+// Export for use in other modules
+export { logInterceptor,LogInterceptor };
 import { init, verifyWasmBuild, runDecoderTests } from './utils/wasm-test';
 import { 
     WasmModule,  
@@ -1132,7 +1254,8 @@ import {
     DecoderStatus 
 } from './types';
 import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
-
+import { logInterceptor, LogInterceptor } from './log-interceptor';
+import '../styles/styles.css';
 
 class TestUI {
     private decoder: IMFDecoder | null = null;
@@ -1141,6 +1264,7 @@ class TestUI {
     private animationFrameId: number | null = null;
     private frameCount: number = 0;
     private canvas: HTMLCanvasElement | null = null;
+    private logInterceptor: LogInterceptor;
 
     private buttons!: {
         verify: HTMLButtonElement;
@@ -1157,178 +1281,44 @@ class TestUI {
     };
 
     constructor() {
-        this.setupLayout();
+        this.logInterceptor = logInterceptor;
         this.initializeElements();
         this.setupEventListeners();
-        // this.interceptConsole();
-    }
-
-    private setupLayout() {
-        document.body.innerHTML = `
-        <div class="container">
-            <div class="left-panel">
-                <h1>IMF Decoder Test</h1>
-                <div class="status-panel">
-                    <div class="status-item">
-                        <span class="status-label">Player Status:</span>
-                        <span id="player-status" class="status-value status-idle">Idle</span>
-                    </div>
-                    <div class="status-item">
-                        <span class="status-label">Decoder Status:</span>
-                        <span id="decoder-status" class="status-value status-idle">Idle</span>
-                    </div>
-                </div>
-                <canvas id="decoder-canvas"></canvas>
-                <div class="button-group">
-                    <button id="verifyWasm">Verify WASM</button>
-                    <button id="initDecoder" disabled>Initialize Decoder</button>
-                    <button id="startDecoder" disabled>Start Decoder</button>
-                    <button id="processFrame" disabled>Process Frame</button>
-                    <button id="pauseDecoder" disabled>Pause Decoder</button>
-                    <button id="clearLog">Clear Log</button>
-                </div>
-            </div>
-            <div class="right-panel">
-                <div class="log-header">
-                    <h2>Decoder Log</h2>
-                </div>
-                <div id="log" class="log-content"></div>
-            </div>
-        </div>
-    `;
-
-        const style = document.createElement('style');
-        style.textContent = `
-         #decoder-canvas {
-            display: block;
-            margin: 20px auto;
-            max-width: 100%;
-            height: auto;
-            border: 1px solid #ccc;
-        }
-            .container {
-                display: flex;
-                gap: 20px;
-                padding: 20px;
-                max-width: 1400px;
-                margin: 0 auto;
-                height: calc(100vh - 40px);
-            }
-
-            .left-panel {
-                flex: 1;
-                min-width: 400px;
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-            }
-
-            .right-panel {
-                flex: 1;
-                min-width: 400px;
-                display: flex;
-                flex-direction: column;
-                border-left: 1px solid #ccc;
-                padding-left: 20px;
-            }
-
-            .status-panel {
-                background: #f8f9fa;
-                padding: 15px;
-                border-radius: 8px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-
-            .status-item {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 10px;
-            }
-
-            .status-label {
-                font-weight: bold;
-            }
-
-            .status-value {
-                padding: 4px 12px;
-                border-radius: 12px;
-                font-size: 14px;
-            }
-
-            .status-idle { background: #ffd700; }
-            .status-ready { background: #90ee90; }
-            .status-playing { background: #87ceeb; }
-            .status-paused { background: #ffb6c1; }
-
-            #decoder-canvas {
-                width: 100%;
-                max-width: 640px;
-                height: auto;
-                border: 1px solid #ccc;
-                border-radius: 4px;
-                margin: 0 auto;
-            }
-
-            .button-group {
-                display: grid;
-                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
-                gap: 10px;
-            }
-
-            button {
-                padding: 10px;
-                border: none;
-                border-radius: 4px;
-                background: #4285f4;
-                color: white;
-                cursor: pointer;
-                transition: background 0.2s;
-            }
-
-            button:hover:not(:disabled) {
-                background: #3367d6;
-            }
-
-            button:disabled {
-                background: #ccc;
-                cursor: not-allowed;
-            }
-
-            .log-header {
-                padding: 10px 0;
-                border-bottom: 1px solid #eee;
-                margin-bottom: 10px;
-            }
-
-            .log-content {
-                flex: 1;
-                overflow-y: auto;
-                background: #f8f9fa;
-                padding: 10px;
-                border-radius: 4px;
-                font-family: monospace;
-                font-size: 13px;
-                line-height: 1.5;
-            }
-
-            .info { color: #4285f4; }
-            .error { color: #dc3545; }
-            .success { color: #28a745; }
-
-            h1, h2 {
-                margin: 0 0 20px 0;
-                color: #333;
-            }
-        `;
-        document.head.appendChild(style);
-
-        // Setup canvas after layout
+        this.interceptConsole();
+        
+        // Initialize canvas
         this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
         if (this.canvas) {
             this.canvas.width = 640;
             this.canvas.height = 480;
         }
+    }
+
+    private initializeElements() {
+        // Get all required DOM elements
+        const elements = {
+            verify: 'verifyWasm',
+            init: 'initDecoder',
+            start: 'startDecoder',
+            process: 'processFrame',
+            pause: 'pauseDecoder',
+            clear: 'clearLog',
+            playerStatus: 'player-status',
+            decoderStatus: 'decoder-status'
+        };
+
+        // Initialize buttons
+        this.buttons = Object.entries(elements).slice(0, 6).reduce((acc, [key, id]) => {
+            const element = document.getElementById(id);
+            if (!element) throw new Error(`Button ${id} not found`);
+            return { ...acc, [key]: element as HTMLButtonElement };
+        }, {}) as typeof this.buttons;
+
+        // Initialize status elements
+        this.statusElements = {
+            player: document.getElementById(elements.playerStatus) || throwError(elements.playerStatus),
+            decoder: document.getElementById(elements.decoderStatus) || throwError(elements.decoderStatus)
+        };
     }
 
     private async checkWebGPUSupport(): Promise<boolean> {
@@ -1363,37 +1353,6 @@ class TestUI {
     
     
 
-
-    private initializeElements() {
-        // Verify all elements exist before assignment
-        const verifyBtn = document.getElementById('verifyWasm');
-        const initBtn = document.getElementById('initDecoder');
-        const startBtn = document.getElementById('startDecoder');
-        const processBtn = document.getElementById('processFrame');
-        const pauseBtn = document.getElementById('pauseDecoder');
-        const clearBtn = document.getElementById('clearLog');
-        const playerStatus = document.getElementById('player-status');
-        const decoderStatus = document.getElementById('decoder-status');
-
-        if (!verifyBtn || !initBtn || !startBtn || !processBtn || 
-            !pauseBtn || !clearBtn || !playerStatus || !decoderStatus) {
-            throw new Error('Required DOM elements not found');
-        }
-
-        this.buttons = {
-            verify: verifyBtn as HTMLButtonElement,
-            init: initBtn as HTMLButtonElement,
-            start: startBtn as HTMLButtonElement,
-            process: processBtn as HTMLButtonElement,
-            pause: pauseBtn as HTMLButtonElement,
-            clear: clearBtn as HTMLButtonElement
-        };
-
-        this.statusElements = {
-            player: playerStatus,
-            decoder: decoderStatus
-        };
-    }
 
     private interceptConsole() {
         const originalLog = console.log;
@@ -1490,8 +1449,13 @@ class TestUI {
             this.canvas.width = 640;
             this.canvas.height = 480;
             
-            // Enable debug mode for testing
-            this.decoder.set_debug_mode(true);
+            // Enable debug mode using the proper method
+            this.decoder.enable_debug_mode();
+            
+            // Verify debug mode is set
+            if (!this.decoder.is_debug_mode()) {
+                throw new Error('Failed to enable debug mode');
+            }
             
             // Create and set reference data
             const referenceData = this.createReferenceData();
@@ -1499,18 +1463,8 @@ class TestUI {
             this.log('info', `Reference data set: ${refResult}`);
     
             // Initialize WebGPU context
-            try {
-                const initResult = await this.decoder.initialize_render_context(this.canvas);
-                this.log('info', `Render context initialized: ${initResult}`);
-            } catch (error) {
-                throw new Error(`WebGPU context initialization failed: ${error}`);
-            }
-    
-            // Check decoder status
-            const status = await this.decoder.get_status();
-            if (!status.initialized) {
-                throw new Error('Decoder initialization incomplete');
-            }
+            const initResult = await this.decoder.initialize_render_context(this.canvas);
+            this.log('info', `Render context initialized: ${initResult}`);
     
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);
@@ -1748,6 +1702,8 @@ class TestUI {
     }
 
     private clearLog() {
+        this.logInterceptor.clear();
+
         const logDiv = document.getElementById('log')!;
         logDiv.innerHTML = '';
     }
@@ -1759,6 +1715,11 @@ if (document.readyState === 'loading') {
 } else {
     new TestUI();
 }
+
+function throwError(id: string): never {
+    throw new Error(`Element ${id} not found`);
+}
+
 
 export { TestUI };
 use std::collections::VecDeque;
@@ -2746,9 +2707,23 @@ impl IMFDecoder {
             animation_closure: None,
         })
     }
+    #[wasm_bindgen(getter)]
+    pub fn debug_mode(&self) -> bool {
+        self.debug_mode
+    }
 
+    #[wasm_bindgen(setter)]
+    pub fn set_debug_mode(&mut self, value: bool) {
+        self.debug_mode = value;
+        info!("Debug mode set to: {}", value);
+    }
 
-    // Add proper WASM bindings for debug mode
+    // Method to check debug status - useful for verification
+    #[wasm_bindgen]
+    pub fn is_debug_mode(&self) -> bool {
+        self.debug_mode
+    }
+
     #[wasm_bindgen]
     pub fn enable_debug_mode(&mut self) {
         self.debug_mode = true;
@@ -2761,10 +2736,7 @@ impl IMFDecoder {
         info!("Debug mode disabled");
     }
 
-    #[wasm_bindgen]
-    pub fn is_debug_mode(&self) -> bool {
-        self.debug_mode
-    }
+
 
     #[wasm_bindgen]
     pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
@@ -3424,4 +3396,164 @@ pub use wasm::bindings::*;
 #[wasm_bindgen(start)]
 pub fn start() {
     std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+}
+.
+├── benches
+│   └── decode_bench.rs
+├── Cargo.lock
+├── Cargo.toml
+├── context.sh
+├── dir.txt
+├── eslint-config.json
+├── index.html
+├── js
+│   ├── decoder
+│   ├── index.ts
+│   ├── log-interceptor.ts
+│   ├── tfjs_bindings.js
+│   ├── types
+│   └── utils
+├── js.combined
+├── package.json
+├── package-lock.json
+├── pnpm-lock.yaml
+├── project.txt
+├── README.md
+├── run.sh
+├── shaders
+│   └── shader.wgsl
+├── src
+│   ├── decoder
+│   ├── lib.rs
+│   ├── player.rs
+│   ├── utils
+│   └── wasm
+├── src.combined
+├── styles
+│   └── styles.css
+├── tests
+│   └── decoder_tests.rs
+├── tree.txt
+├── tsconfig.json
+├── webpack.config.js
+└── webpack.worker.config.js
+
+12 directories, 27 files
+const path = require('path');
+const WasmPackPlugin = require("@wasm-tool/wasm-pack-plugin");
+const CopyWebpackPlugin = require("copy-webpack-plugin");
+const HtmlWebpackPlugin = require('html-webpack-plugin');
+
+module.exports = {
+    entry: {
+        main: './js/index.ts',
+        worker: './js/decoder/worker.ts'
+    },
+    output: {
+        path: path.resolve(__dirname, 'dist'),
+        filename: '[name].js',
+        clean: true,
+        webassemblyModuleFilename: "[hash].module.wasm"
+    },
+    resolve: {
+        extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm', '.css'],
+        alias: {
+            '@': path.resolve(__dirname, 'js'),
+            '@pkg': path.resolve(__dirname, 'pkg')
+        }
+    },
+    module: {
+        rules: [
+            {
+                test: /\.tsx?$/,
+                use: {
+                    loader: 'ts-loader',
+                    options: {
+                        transpileOnly: true
+                    }
+                },
+                exclude: /node_modules/
+            },
+            {
+                test: /\.css$/,
+                use: ['style-loader', 'css-loader'],
+                sideEffects: true
+            }
+        ]
+    },
+    experiments: {
+        asyncWebAssembly: true,
+        topLevelAwait: true
+    },
+    plugins: [
+        new HtmlWebpackPlugin({
+            template: './index.html',  // Updated path
+            filename: 'index.html',
+        }),
+        new WasmPackPlugin({
+            crateDirectory: path.resolve(__dirname, "."),
+            outDir: 'pkg',
+            extraArgs: '--target web'
+        }),
+        new CopyWebpackPlugin({
+            patterns: [
+                {
+                    from: 'styles',  // Just the styles directory
+                    to: 'styles',
+                    noErrorOnMissing: true
+                }
+            ]
+        })
+    ],
+    devServer: {
+        static: {
+            directory: path.join(__dirname, 'dist'),
+            watch: true,
+            serveIndex: true
+        },
+        devMiddleware: {
+            mimeTypes: {
+                'css': 'text/css'
+            }
+        },
+        hot: true,
+        compress: true,
+        port: 'auto',
+        historyApiFallback: true,
+        headers: {
+            'Access-Control-Allow-Origin': '*'
+        }
+    }
+};{
+  "name": "imf-decoder",
+  "version": "1.0.0",
+  "scripts": {
+    "clean": "rm -rf dist pkg",
+    "build:wasm": "wasm-pack build --target web",
+    "build:ts": "webpack --mode production",
+    "build": "pnpm run clean && pnpm run build:wasm && pnpm run build:ts",
+    "start": "pnpm run build:wasm && webpack serve --mode development --open"
+  },
+  "dependencies": {
+    "@tensorflow/tfjs": "^4.4.0"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.23.0",
+    "@babel/preset-env": "^7.22.20",
+    "@types/node": "^20.8.0",
+    "@types/webpack": "^5.28.0",
+    "@typescript-eslint/eslint-plugin": "^6.7.0",
+    "@typescript-eslint/parser": "^6.7.0",
+    "@wasm-tool/wasm-pack-plugin": "^1.6.0",
+    "babel-loader": "^9.1.3",
+    "copy-webpack-plugin": "^11.0.0",
+    "css-loader": "^6.11.0",
+    "html-webpack-plugin": "^5.5.0",
+    "style-loader": "^3.3.4",
+    "ts-loader": "^9.4.4",
+    "typescript": "^5.2.2",
+    "webpack": "^5.75.0",
+    "webpack-cli": "^5.1.4",
+    "webpack-dev-server": "^4.11.1"
+  }
 }

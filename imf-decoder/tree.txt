@@ -4,9 +4,9 @@
 ├── Cargo.lock
 ├── Cargo.toml
 ├── context.sh
-├── context.txt
 ├── dir.txt
 ├── eslint-config.json
+├── index.html
 ├── js
 │   ├── decoder
 │   ├── index.ts
@@ -14,10 +14,11 @@
 │   ├── tfjs_bindings.js
 │   ├── types
 │   └── utils
-├── js+rs.txt
+├── js.combined
 ├── package.json
 ├── package-lock.json
 ├── pnpm-lock.yaml
+├── project.txt
 ├── README.md
 ├── run.sh
 ├── shaders
@@ -28,14 +29,14 @@
 │   ├── player.rs
 │   ├── utils
 │   └── wasm
+├── src.combined
+├── styles
+│   └── styles.css
 ├── tests
 │   └── decoder_tests.rs
 ├── tree.txt
 ├── tsconfig.json
 ├── webpack.config.js
-├── webpack.worker.config.js
-└── www
-    ├── index.html
-    └── styles
+└── webpack.worker.config.js
 
-13 directories, 25 files
+12 directories, 27 files
