@@ -83,10 +83,16 @@ module.exports = {
         },
         hot: true,
         compress: true,
-        port: 8092,
+        port: 'auto',  // Let webpack find an available port
         historyApiFallback: true,
         headers: {
             'Access-Control-Allow-Origin': '*'
         },
+        onListening: function (devServer) {
+            if (!devServer) {
+                throw new Error('webpack-dev-server is not defined');
+            }
+            const port = devServer.server.address().port;
+            console.log('Listening on port:', port);
+        }
     }
-};
