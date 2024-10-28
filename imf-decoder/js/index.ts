@@ -38,45 +38,51 @@ class TestUI {
         this.initializeElements();
         this.setupEventListeners();
         // this.interceptConsole();
-        this.setupCanvas();
     }
 
     private setupLayout() {
         document.body.innerHTML = `
-            <div class="container">
-                <div class="left-panel">
-                    <h1>IMF Decoder Test</h1>
-                    <div class="status-panel">
-                        <div class="status-item">
-                            <span class="status-label">Player Status:</span>
-                            <span id="player-status" class="status-value status-idle">Idle</span>
-                        </div>
-                        <div class="status-item">
-                            <span class="status-label">Decoder Status:</span>
-                            <span id="decoder-status" class="status-value status-idle">Idle</span>
-                        </div>
+        <div class="container">
+            <div class="left-panel">
+                <h1>IMF Decoder Test</h1>
+                <div class="status-panel">
+                    <div class="status-item">
+                        <span class="status-label">Player Status:</span>
+                        <span id="player-status" class="status-value status-idle">Idle</span>
                     </div>
-                    <canvas id="decoder-canvas"></canvas>
-                    <div class="button-group">
-                        <button id="verifyWasm">Verify WASM</button>
-                        <button id="initDecoder" disabled>Initialize Decoder</button>
-                        <button id="startDecoder" disabled>Start Decoder</button>
-                        <button id="processFrame" disabled>Process Frame</button>
-                        <button id="pauseDecoder" disabled>Pause Decoder</button>
-                        <button id="clearLog">Clear Log</button>
+                    <div class="status-item">
+                        <span class="status-label">Decoder Status:</span>
+                        <span id="decoder-status" class="status-value status-idle">Idle</span>
                     </div>
                 </div>
-                <div class="right-panel">
-                    <div class="log-header">
-                        <h2>Decoder Log</h2>
-                    </div>
-                    <div id="log" class="log-content"></div>
+                <canvas id="decoder-canvas"></canvas>
+                <div class="button-group">
+                    <button id="verifyWasm">Verify WASM</button>
+                    <button id="initDecoder" disabled>Initialize Decoder</button>
+                    <button id="startDecoder" disabled>Start Decoder</button>
+                    <button id="processFrame" disabled>Process Frame</button>
+                    <button id="pauseDecoder" disabled>Pause Decoder</button>
+                    <button id="clearLog">Clear Log</button>
                 </div>
             </div>
-        `;
+            <div class="right-panel">
+                <div class="log-header">
+                    <h2>Decoder Log</h2>
+                </div>
+                <div id="log" class="log-content"></div>
+            </div>
+        </div>
+    `;
 
         const style = document.createElement('style');
         style.textContent = `
+         #decoder-canvas {
+            display: block;
+            margin: 20px auto;
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ccc;
+        }
             .container {
                 display: flex;
                 gap: 20px;
@@ -232,31 +238,6 @@ class TestUI {
         }
     }
     
-    private setupCanvas() {
-        // Create and configure canvas for WebGPU
-        this.canvas = document.createElement('canvas');
-        this.canvas.width = 640;
-        this.canvas.height = 480;
-        this.canvas.style.border = '1px solid #ccc';
-        
-        // Insert canvas after the status panel
-        const statusPanel = document.querySelector('.status-panel');
-        if (statusPanel && statusPanel.parentNode) {
-            statusPanel.parentNode.insertBefore(this.canvas, statusPanel.nextSibling);
-        }
-
-        // Add canvas style
-        const style = document.createElement('style');
-        style.textContent = `
-            canvas {
-                display: block;
-                margin: 20px auto;
-                max-width: 100%;
-                height: auto;
-            }
-        `;
-        document.head.appendChild(style);
-    }
     
 
 
