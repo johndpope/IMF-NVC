@@ -44,7 +44,17 @@ declare module '@pkg/imf_decoder' {
         get_status(): DecoderStatus;
         start_player_loop(): Promise<void>;
         stop_player_loop(): void;
+        
+        // Debug mode methods
+        debug_mode: boolean;
+        enable_debug_mode(): void;
+        disable_debug_mode(): void;
+        is_debug_mode(): boolean;
+        
+        // Diagnostic mode property
         diagnostic_mode: boolean;
+        
+        // Other methods
         set_reference_data(data: ReferenceData): Promise<string>;
         process_tokens(tokens: FrameToken[]): Promise<string>;
         process_batch(): Promise<string>;

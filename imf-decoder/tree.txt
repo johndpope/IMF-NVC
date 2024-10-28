@@ -1,0 +1,41 @@
+.
+├── benches
+│   └── decode_bench.rs
+├── Cargo.lock
+├── Cargo.toml
+├── context.sh
+├── context.txt
+├── dir.txt
+├── eslint-config.json
+├── js
+│   ├── decoder
+│   ├── index.ts
+│   ├── log-interceptor.ts
+│   ├── tfjs_bindings.js
+│   ├── types
+│   └── utils
+├── js+rs.txt
+├── package.json
+├── package-lock.json
+├── pnpm-lock.yaml
+├── README.md
+├── run.sh
+├── shaders
+│   └── shader.wgsl
+├── src
+│   ├── decoder
+│   ├── lib.rs
+│   ├── player.rs
+│   ├── utils
+│   └── wasm
+├── tests
+│   └── decoder_tests.rs
+├── tree.txt
+├── tsconfig.json
+├── webpack.config.js
+├── webpack.worker.config.js
+└── www
+    ├── index.html
+    └── styles
+
+13 directories, 25 files

@@ -15,7 +15,7 @@ module.exports = {
         webassemblyModuleFilename: "[hash].module.wasm"
     },
     resolve: {
-        extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm'],
+        extensions: ['.ts', '.tsx', '.js', '.jsx', '.wasm', '.css'],
         alias: {
             '@': path.resolve(__dirname, 'js'),
             '@pkg': path.resolve(__dirname, 'pkg')
@@ -35,7 +35,8 @@ module.exports = {
             },
             {
                 test: /\.css$/,
-                use: ['style-loader', 'css-loader']
+                use: ['style-loader', 'css-loader'],
+                sideEffects: true
             }
         ]
     },
@@ -61,8 +62,32 @@ module.exports = {
                     globOptions: {
                         ignore: ['**/*.html']
                     }
+                },
+                {
+                    from: 'styles',  // Assuming your CSS is in a 'styles' directory
+                    to: 'styles',
+                    globOptions: {
+                        ignore: ['**/*.map']
+                    }
                 }
             ]
         })
-    ]
+    ],
+    devServer: {
+        static: {
+            directory: path.join(__dirname, 'dist'),
+            watch: true,
+            serveIndex: true,
+            mimeTypes: {
+                'css': 'text/css'
+            }
+        },
+        hot: true,
+        compress: true,
+        port: 8092,
+        historyApiFallback: true,
+        headers: {
+            'Access-Control-Allow-Origin': '*',
+        }
+    }
 };

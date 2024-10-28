@@ -11,6 +11,7 @@ import {
 import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
 
 
+
 class TestUI {
     private decoder: IMFDecoder | null = null;
     private playerStatus: PlayerStatus = PlayerStatus.Idle;
@@ -37,7 +38,7 @@ class TestUI {
         this.setupLayout();
         this.initializeElements();
         this.setupEventListeners();
-        // this.interceptConsole();
+        this.interceptConsole();
     }
 
     private setupLayout() {
@@ -367,8 +368,13 @@ class TestUI {
             this.canvas.width = 640;
             this.canvas.height = 480;
             
-            // Enable debug mode for testing
-            this.decoder.set_debug_mode(true);
+            // Enable debug mode using the proper method
+            this.decoder.enable_debug_mode();
+            
+            // Verify debug mode is set
+            if (!this.decoder.is_debug_mode()) {
+                throw new Error('Failed to enable debug mode');
+            }
             
             // Create and set reference data
             const referenceData = this.createReferenceData();
@@ -376,18 +382,8 @@ class TestUI {
             this.log('info', `Reference data set: ${refResult}`);
     
             // Initialize WebGPU context
-            try {
-                const initResult = await this.decoder.initialize_render_context(this.canvas);
-                this.log('info', `Render context initialized: ${initResult}`);
-            } catch (error) {
-                throw new Error(`WebGPU context initialization failed: ${error}`);
-            }
-    
-            // Check decoder status
-            const status = await this.decoder.get_status();
-            if (!status.initialized) {
-                throw new Error('Decoder initialization incomplete');
-            }
+            const initResult = await this.decoder.initialize_render_context(this.canvas);
+            this.log('info', `Render context initialized: ${initResult}`);
     
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);

@@ -11,7 +11,8 @@ cd src
 dump rs
 mv src.combined ..
 cd ..
-cat js.combined src.combined > js+rs.txt
+tree -I 'node_modules|target|dist|pkg' -L 2 > tree.txt
+cat js.combined src.combined tree.txt > project.txt
 
 rm src.combined
 rm js.combined

@@ -4,59 +4,10 @@
 <head>
     <meta charset="utf-8">
     <title>IMF Decoder Test</title>
-    <style>
-        .test-panel {
-            margin: 20px;
-            padding: 20px;
-            border: 1px solid #ccc;
-            border-radius: 4px;
-        }
-        .test-button {
-            padding: 10px 20px;
-            margin: 5px;
-            border: none;
-            border-radius: 4px;
-            background-color: #007bff;
-            color: white;
-            cursor: pointer;
-        }
-        .test-button:disabled {
-            background-color: #ccc;
-        }
-        .status-panel {
-            margin: 10px 0;
-            padding: 10px;
-            background-color: #f8f9fa;
-            border-radius: 4px;
-        }
-        .status-item {
-            display: flex;
-            justify-content: space-between;
-            padding: 5px;
-            border-bottom: 1px solid #eee;
-        }
-        .status-label {
-            font-weight: bold;
-        }
-        .status-value {
-            padding: 2px 8px;
-            border-radius: 3px;
-        }
-        .status-idle { background-color: #e2e3e5; }
-        .status-ready { background-color: #d4edda; }
-        .status-playing { background-color: #cce5ff; }
-        .status-paused { background-color: #fff3cd; }
-        .status-error { background-color: #f8d7da; }
-        #log {
-            margin-top: 20px;
-            padding: 10px;
-            background-color: #f8f9fa;
-            border-radius: 4px;
-            max-height: 400px;
-            overflow-y: auto;
-            font-family: monospace;
-        }
-    </style>
+    <link rel="stylesheet" href="styles/styles.css">
+
+
+    
 </head>
 <body>
     <div class="test-panel">
@@ -74,6 +25,38 @@
             </div>
         </div>
 
+        <!-- Debug Panel -->
+        <div class="debug-panel">
+            <h3>Debug Status</h3>
+            <div class="status-item">
+                <span class="status-label">Debug Mode:</span>
+                <span id="debug-status" class="status-value status-disabled">Disabled</span>
+            </div>
+            <div class="debug-controls">
+                <button id="enableDebug" class="debug-toggle">Enable Debug</button>
+                <button id="disableDebug" class="debug-toggle">Disable Debug</button>
+            </div>
+        </div>
+
+        <!-- Metrics Panel -->
+        <div class="metrics-panel">
+            <h3>Debug Metrics</h3>
+            <div class="metrics-grid">
+                <div class="metric-item">
+                    <div class="status-label">Frame Count:</div>
+                    <div id="frame-count">0</div>
+                </div>
+                <div class="metric-item">
+                    <div class="status-label">Frame Time:</div>
+                    <div id="frame-time">0 ms</div>
+                </div>
+                <div class="metric-item">
+                    <div class="status-label">Queue Size:</div>
+                    <div id="queue-size">0</div>
+                </div>
+            </div>
+        </div>
+
         <!-- Control Buttons -->
         <div>
             <button id="verifyWasm" class="test-button">Verify WASM</button>
@@ -87,5 +70,35 @@
         <!-- Debug Output -->
         <div id="log"></div>
     </div>
+
+    <script>
+        // Add these functions to your existing JavaScript
+        function updateDebugStatus(isEnabled) {
+            const statusElement = document.getElementById('debug-status');
+            statusElement.className = `status-value status-${isEnabled ? 'enabled' : 'disabled'}`;
+            statusElement.textContent = isEnabled ? 'Enabled' : 'Disabled';
+        }
+
+        function updateMetrics(metrics) {
+            document.getElementById('frame-count').textContent = metrics.frameCount;
+            document.getElementById('frame-time').textContent = `${metrics.frameTime.toFixed(2)} ms`;
+            document.getElementById('queue-size').textContent = metrics.queueSize;
+        }
+
+        // Initialize debug controls
+        document.getElementById('enableDebug').addEventListener('click', function() {
+            if (window.decoder) {
+                window.decoder.enable_debug_mode();
+                updateDebugStatus(true);
+            }
+        });
+
+        document.getElementById('disableDebug').addEventListener('click', function() {
+            if (window.decoder) {
+                window.decoder.disable_debug_mode();
+                updateDebugStatus(false);
+            }
+        });
+    </script>
 </body>
 </html>

@@ -355,9 +355,23 @@ impl IMFDecoder {
             animation_closure: None,
         })
     }
+    #[wasm_bindgen(getter)]
+    pub fn debug_mode(&self) -> bool {
+        self.debug_mode
+    }
 
+    #[wasm_bindgen(setter)]
+    pub fn set_debug_mode(&mut self, value: bool) {
+        self.debug_mode = value;
+        info!("Debug mode set to: {}", value);
+    }
 
-    // Add proper WASM bindings for debug mode
+    // Method to check debug status - useful for verification
+    #[wasm_bindgen]
+    pub fn is_debug_mode(&self) -> bool {
+        self.debug_mode
+    }
+
     #[wasm_bindgen]
     pub fn enable_debug_mode(&mut self) {
         self.debug_mode = true;
@@ -370,10 +384,7 @@ impl IMFDecoder {
         info!("Debug mode disabled");
     }
 
-    #[wasm_bindgen]
-    pub fn is_debug_mode(&self) -> bool {
-        self.debug_mode
-    }
+
 
     #[wasm_bindgen]
     pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
