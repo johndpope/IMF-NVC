@@ -7,7 +7,7 @@ use wasm_bindgen::Clamped;
 use crate::decoder::{Frame, Queue as FrameQueue};
 use std::cell::RefCell;
 use std::rc::Rc;
-use web_sys::window;
+// use web_sys::window;
 use wasm_bindgen::JsValue;
 
 
@@ -21,13 +21,15 @@ pub struct IMFDecoder {
     frame_queue: FrameQueue,
     canvas: Option<HtmlCanvasElement>,
     context: Option<CanvasRenderingContext2d>,
-    animation_id: Option<i32>,
+    animation_id: RefCell<Option<i32>>,  // Changed to RefCell
     reference_data: Option<ReferenceData>,
     diagnostic_mode: bool,
     debug_mode: bool,
     frame_count: RefCell<u64>,
     last_frame_time: RefCell<f64>,
-    animation_callback: AnimationCallback,
+    max_frames: u64, 
+    is_playing: RefCell<bool>,  // Added missing field
+
 
 }
 
@@ -79,13 +81,15 @@ impl IMFDecoder {
             frame_queue: FrameQueue::new(10000, 4),
             canvas: None,
             context: None,
-            animation_id: None,
+            animation_id: RefCell::new(None),
             reference_data: None,
             diagnostic_mode: false,
             debug_mode: false,
             frame_count: RefCell::new(0),
             last_frame_time: RefCell::new(0.0),
-            animation_callback: Rc::new(RefCell::new(None)),
+            max_frames: 300,
+            is_playing: RefCell::new(false),  // Initialize is_playing
+
         })
     }
 
@@ -118,109 +122,59 @@ impl IMFDecoder {
         info!("Debug mode disabled");
     }
  
-    // pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
-    //     debug!("Starting player loop");
-        
-    //     self.stop_player_loop();
-
-    //     let window = web_sys::window()
-    //         .ok_or_else(|| JsValue::from_str("No window found"))?;
-    //     let window = Rc::new(window);
-    //     let window_clone = window.clone();
-
-    //     let this = Rc::new(RefCell::new(self));
-    //     let this_clone = this.clone();
-        
-    //     // Create the animation closure
-    //     let closure = Rc::new(RefCell::new(None));
-    //     let closure_clone = closure.clone();
-
-    //     *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
-    //         let mut this = this_clone.borrow_mut();
-    //         if let Err(e) = this.render_frame() {
-    //             error!("Render error: {:?}", e);
-    //             return;
-    //         }
-
-    //         // Update frame count
-    //         *this.frame_count.borrow_mut() += 1;
-
-    //         // Request next frame
-    //         if let Some(ref callback) = *closure_clone.borrow() {
-    //             if let Ok(id) = window_clone.request_animation_frame(callback.as_ref().unchecked_ref()) {
-    //                 this.animation_id = Some(id);
-    //             }
-    //         }
-    //     }) as Box<dyn FnMut()>));
-
-    //     // Start the animation
-    //     if let Some(ref callback) = *closure.borrow() {
-    //         let id = window.request_animation_frame(callback.as_ref().unchecked_ref())?;
-    //         let mut this = this.borrow_mut();
-    //         this.animation_id = Some(id);
-    //         this.animation_closure = Some(closure);
-    //     }
-
-    //     Ok(())
-    // }
-    pub fn start_player_loop(&self) -> Result<(), JsValue> {
-        let window = window().expect("no global `window` exists");
-        let window = Rc::new(window);
-        let window_clone = window.clone();
-    
-        let callback_ref = self.animation_callback.clone();
-        let context = self.context.clone();
-    
-        // Create a simple animation closure
-        let new_callback = Closure::wrap(Box::new(move || {
-            if let Some(ref ctx) = context {
-                // Clear and draw something
-                ctx.clear_rect(0.0, 0.0, 640.0, 480.0);
-                
-                // Use the non-deprecated way to set fill style
-                let style = JsValue::from_str("blue");
-                ctx.set_fill_style(&style);
-                
-                ctx.fill_rect(50.0, 50.0, 100.0, 100.0);
-            }
-    
-            // Request next frame using the cloned window
-            if let Some(ref callback) = *callback_ref.borrow() {
-                let _ = window_clone.request_animation_frame(callback.as_ref().unchecked_ref());
-            }
-        }) as Box<dyn FnMut()>);
-    
-        // Store the new callback
-        *self.animation_callback.borrow_mut() = Some(new_callback);
-    
-        // Start the animation with the original window
-        if let Some(ref callback) = *self.animation_callback.borrow() {
-            window.request_animation_frame(callback.as_ref().unchecked_ref())?;
+    pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
+        if !*self.is_playing.borrow() {
+            *self.is_playing.borrow_mut() = true;
+            self.schedule_next_frame()?;
         }
+        Ok(())
+    }
     
+    fn schedule_next_frame(&self) -> Result<(), JsValue> {
+        if *self.is_playing.borrow() {
+            if let Some(window) = web_sys::window() {
+                let this = self as *const IMFDecoder;
+                
+                let closure = Closure::once_into_js(move || {
+                    let decoder = unsafe { &*this };
+                    if *decoder.is_playing.borrow() {
+                        if let Err(e) = decoder.render_frame() {
+                            error!("Render error: {:?}", e);
+                            return;
+                        }
+                        
+                        let _ = decoder.schedule_next_frame();
+                    }
+                });
+    
+                let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+                *self.animation_id.borrow_mut() = Some(id);
+            }
+        }
         Ok(())
     }
 
-    fn generate_debug_pattern(&self, frame_data: &mut [u8]) {
+
+    fn generate_debug_pattern(&self) -> Vec<u8> {
+        let mut frame_data = vec![0u8; (self.width * self.height * 4) as usize];
         let time = (*self.frame_count.borrow() as f64) * 0.05;
         
         for y in 0..self.height {
             for x in 0..self.width {
                 let idx = ((y * self.width + x) * 4) as usize;
                 
-                // Create animated color pattern
                 let r = ((((x as f64) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
                 let g = ((((y as f64) * 0.01 + time).cos() + 1.0) * 127.5) as u8;
                 let b = (((((x + y) as f64) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
                 
-                frame_data[idx] = r;     // R
-                frame_data[idx + 1] = g; // G
-                frame_data[idx + 2] = b; // B
-                frame_data[idx + 3] = 255; // A
+                frame_data[idx] = r;
+                frame_data[idx + 1] = g;
+                frame_data[idx + 2] = b;
+                frame_data[idx + 3] = 255;
             }
         }
+        frame_data
     }
-
 
     #[wasm_bindgen]
     pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
@@ -349,12 +303,13 @@ impl IMFDecoder {
             &"initialized".into(),
             &(self.canvas.is_some() && self.context.is_some()).into()
         ).unwrap();
-
+    
         js_sys::Reflect::set(
             &status,
             &"running".into(),
-            &self.animation_id.is_some().into()
+            &self.animation_id.borrow().is_some().into()  // Fixed is_some() call
         ).unwrap();
+    
 
         // Performance metrics
         let metrics = js_sys::Object::new();
@@ -473,12 +428,16 @@ impl IMFDecoder {
 
     
     #[wasm_bindgen]
-    pub fn stop_player_loop(&mut self) {
-        // Drop the animation callback
-        self.animation_callback.borrow_mut().take();
+    pub fn stop_player_loop(&self) {
+        *self.is_playing.borrow_mut() = false;
+        if let Some(id) = self.animation_id.borrow_mut().take() {
+            if let Some(window) = web_sys::window() {
+                window.cancel_animation_frame(id);
+            }
+        }
         debug!("Animation stopped");
     }
-
+    
     #[wasm_bindgen(getter)]
     pub fn diagnostic_mode(&self) -> bool {
         self.diagnostic_mode
@@ -559,42 +518,24 @@ impl IMFDecoder {
 
 
 
-    fn render_frame(&mut self) -> Result<(), JsValue> {
-        debug!("Starting render frame");
-        
+    fn render_frame(&self) -> Result<(), JsValue> {
         if let Some(context) = &self.context {
-            let width = self.width;
-            let height = self.height;
-
-            // If in debug mode, generate a test pattern
-            if self.debug_mode {
-                let mut data = vec![0u8; (width * height * 4) as usize];
-                self.generate_debug_pattern(&mut data);
-
-                let image_data = ImageData::new_with_u8_clamped_array_and_sh(
-                    Clamped(&data),
-                    width,
-                    height
-                )?;
-
-                context.put_image_data(&image_data, 0.0, 0.0)?;
-            } else {
-                // Regular frame processing from queue
-                if let Some(frame) = self.frame_queue.process_next() {
-                    let image_data = ImageData::new_with_u8_clamped_array_and_sh(
-                        Clamped(&frame.data),
-                        width,
-                        height
-                    )?;
-                    context.put_image_data(&image_data, 0.0, 0.0)?;
-                }
-            }
-
-            if self.diagnostic_mode {
-                self.update_metrics();
-            }
+            // Generate frame data
+            let frame_data = self.generate_debug_pattern();
+            
+            // Create and render ImageData
+            let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+                Clamped(&frame_data),
+                self.width,
+                self.height
+            )?;
+            
+            context.put_image_data(&image_data, 0.0, 0.0)?;
+            
+            // Update frame counter
+            let mut frame_count = self.frame_count.borrow_mut();
+            *frame_count = (*frame_count + 1) % self.max_frames;
         }
-
         Ok(())
     }
 
