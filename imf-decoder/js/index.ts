@@ -42,19 +42,29 @@ class TestUI {
     };
 
     constructor() {
-        this.logInterceptor = logInterceptor;
+        // First ensure the document is ready
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => this.initialize());
+        } else {
+            this.initialize();
+        }
+    }
+
+    private initialize() {
+        this.setupDebugPanel();
         this.initializeElements();
         this.setupEventListeners();
-        this.interceptConsole();
-        this.setupDebugPanel();
-        
-        // Initialize canvas
+        this.setupCanvas();
+    }
+
+    private setupCanvas() {
         this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
         if (this.canvas) {
             this.canvas.width = 640;
             this.canvas.height = 480;
         }
     }
+
 
     private setupDebugPanel() {
         // Create debug panel container
