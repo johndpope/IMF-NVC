@@ -356,39 +356,42 @@ class TestUI {
             if (!this.decoder || !this.canvas) {
                 throw new Error('Decoder or canvas not initialized');
             }
-
+    
             // Check WebGPU support first
             const hasWebGPU = await this.checkWebGPUSupport();
             if (!hasWebGPU) {
                 throw new Error('WebGPU not supported or failed to initialize');
             }
-
+    
             // Configure canvas for WebGPU
             this.canvas.width = 640;
             this.canvas.height = 480;
+            
+            // Enable debug mode for testing
+            this.decoder.set_debug_mode(true);
             
             // Create and set reference data
             const referenceData = this.createReferenceData();
             const refResult = await this.decoder.set_reference_data(referenceData);
             this.log('info', `Reference data set: ${refResult}`);
-
-            // Initialize WebGPU context with proper error handling
+    
+            // Initialize WebGPU context
             try {
                 const initResult = await this.decoder.initialize_render_context(this.canvas);
                 this.log('info', `Render context initialized: ${initResult}`);
             } catch (error) {
                 throw new Error(`WebGPU context initialization failed: ${error}`);
             }
-
+    
             // Check decoder status
             const status = await this.decoder.get_status();
             if (!status.initialized) {
                 throw new Error('Decoder initialization incomplete');
             }
-
+    
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);
-            this.log('success', 'Decoder initialized successfully');
+            this.log('success', 'Decoder initialized successfully in debug mode');
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.log('error', `Initialization error: ${errorMessage}`);

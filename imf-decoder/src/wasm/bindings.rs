@@ -322,10 +322,12 @@ pub struct IMFDecoder {
     animation_id: Option<i32>,
     reference_data: Option<ReferenceData>,
     diagnostic_mode: bool,
+    debug_mode: bool,  // New field
     frame_count: u64,
     last_frame_time: f64,
     animation_closure: Option<Closure<dyn FnMut()>>,
 }
+
 
 #[wasm_bindgen]
 impl IMFDecoder {
@@ -336,27 +338,42 @@ impl IMFDecoder {
         let _ = console_error_panic_hook::set_once();
         let _ = wasm_logger::init(wasm_logger::Config::default());
         
-        const QUEUE_SIZE: usize = 10000;  // Increased from 60 to 10,000
-        const BATCH_SIZE: usize = 4;      // Keep batch size the same
-        
-        info!("Creating IMFDecoder with dimensions {}x{} and queue capacity {}", 
-            width, height, QUEUE_SIZE);
+        info!("Creating IMFDecoder with dimensions {}x{}", width, height);
 
         Ok(Self {
             width,
             height,
-            frame_queue: FrameQueue::new(QUEUE_SIZE, BATCH_SIZE),
+            frame_queue: FrameQueue::new(10000, 4),
             canvas: None,
             render_context: None,
             animation_id: None,
             reference_data: None,
             diagnostic_mode: false,
+            debug_mode: false,  // Initialize debug mode
             frame_count: 0,
             last_frame_time: 0.0,
             animation_closure: None,
         })
     }
 
+
+    // Add proper WASM bindings for debug mode
+    #[wasm_bindgen]
+    pub fn enable_debug_mode(&mut self) {
+        self.debug_mode = true;
+        info!("Debug mode enabled");
+    }
+
+    #[wasm_bindgen]
+    pub fn disable_debug_mode(&mut self) {
+        self.debug_mode = false;
+        info!("Debug mode disabled");
+    }
+
+    #[wasm_bindgen]
+    pub fn is_debug_mode(&self) -> bool {
+        self.debug_mode
+    }
 
     #[wasm_bindgen]
     pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
@@ -746,7 +763,28 @@ impl IMFDecoder {
         Ok(format!("Successfully processed {} tokens", token_count))
     }
 
-    fn render_frame(&mut self) -> Result<(), JsValue> {
+    fn generate_debug_pattern(&self, frame_data: &mut [u8]) {
+        let time = (self.frame_count as f32) * 0.05;
+        
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = ((y * self.width + x) * 4) as usize;
+                
+                // Create animated color pattern
+                let r = ((((x as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                let g = ((((y as f32) * 0.01 + time).cos() + 1.0) * 127.5) as u8;
+                let b = (((((x + y) as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                
+                frame_data[idx] = r;     // R
+                frame_data[idx + 1] = g; // G
+                frame_data[idx + 2] = b; // B
+                frame_data[idx + 3] = 255; // A
+            }
+        }
+    }
+
+
+     fn render_frame(&mut self) -> Result<(), JsValue> {
         debug!("Starting render frame");
         
         let context = self.render_context.as_ref()
@@ -755,14 +793,12 @@ impl IMFDecoder {
                 JsValue::from_str("Render context not initialized")
             })?;
 
-        if let Some(frame) = self.frame_queue.process_next() {
-            debug!("Got next frame from queue, frame size: {}x{}", self.width, self.height);
-            
-            let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
-                label: Some("Render Encoder"),
-            });
+        if self.debug_mode {
+            // Generate debug pattern
+            let mut frame_data = vec![0u8; (self.width * self.height * 4) as usize];
+            self.generate_debug_pattern(&mut frame_data);
 
-            // Update texture with frame data
+            // Write debug pattern directly to texture
             context.queue.write_texture(
                 ImageCopyTexture {
                     texture: &context.texture,
@@ -770,7 +806,7 @@ impl IMFDecoder {
                     origin: Origin3d::ZERO,
                     aspect: TextureAspect::All,
                 },
-                &frame.data,
+                &frame_data,
                 ImageDataLayout {
                     offset: 0,
                     bytes_per_row: Some(self.width * 4),
@@ -782,39 +818,61 @@ impl IMFDecoder {
                     depth_or_array_layers: 1,
                 },
             );
-
-            debug!("Starting render pass");
-            {
-                let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                    label: Some("Main Render Pass"),
-                    color_attachments: &[Some(RenderPassColorAttachment {
-                        view: &context.texture_view,
-                        resolve_target: None,
-                        ops: Operations {
-                            load: LoadOp::Clear(Color::BLACK),
-                            store: true,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                });
-
-                render_pass.set_pipeline(&context.pipeline);
-                render_pass.set_bind_group(0, &context.bind_group, &[]);
-                render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
-                render_pass.draw(0..4, 0..1);
-            }
-
-            debug!("Submitting command buffer");
-            context.queue.submit(std::iter::once(encoder.finish()));
-
-            if self.diagnostic_mode {
-                self.update_metrics();
-            }
         } else {
-            debug!("No frame available from queue");
+            // Original frame queue processing
+            if let Some(frame) = self.frame_queue.process_next() {
+                context.queue.write_texture(
+                    ImageCopyTexture {
+                        texture: &context.texture,
+                        mip_level: 0,
+                        origin: Origin3d::ZERO,
+                        aspect: TextureAspect::All,
+                    },
+                    &frame.data,
+                    ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.width * 4),
+                        rows_per_image: Some(self.height),
+                    },
+                    Extent3d {
+                        width: self.width,
+                        height: self.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
         }
 
-        debug!("Render frame complete");
+        let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("Main Render Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &context.texture_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,  // Changed to Load since we're using the texture directly
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&context.pipeline);
+            render_pass.set_bind_group(0, &context.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
+        }
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        if self.diagnostic_mode {
+            self.update_metrics();
+        }
+
         Ok(())
     }
 

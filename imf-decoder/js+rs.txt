@@ -1,0 +1,3427 @@
+import * as tf from '@tensorflow/tfjs';
+import { 
+    PlayerStatus, 
+    MessageType, 
+    DecoderConfig,
+    WorkerMessage, 
+    ReferenceData,
+    FrameStats,
+    ModelInputConfig,
+    FrameData
+} from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<MessageType, Function>;
+    private config: DecoderConfig;
+    private frameBuffer: FrameData[] = [];
+    private frameIndex: number = 0;
+    private readonly bufferSize: number = 30;
+    private modelConfig: ModelInputConfig;
+    private lastProcessedFrame: tf.Tensor | null = null;
+    private frameCallback: ((stats: FrameStats) => void) | null = null;
+    private errorCallback: ((error: Error) => void) | null = null;
+    private lastFrameTime: number = 0;
+
+    constructor(config: DecoderConfig) {
+        this.config = config;
+        this.callbacks = new Map();
+        this.worker = new Worker(new URL('./decoder.worker.ts', import.meta.url));
+        this.modelConfig = {
+            inputShape: [1, config.height, config.width, 3],
+            inputNormalization: {
+                mean: [0.485, 0.456, 0.406],
+                std: [0.229, 0.224, 0.225]
+            },
+            maxBatchSize: 1
+        };
+        this.setupWorkerListeners();
+        this.initialize();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event: MessageEvent<WorkerMessage>) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            if (error) {
+                this.handleDecoderError(error);
+                return;
+            }
+
+            switch (type) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                case MessageType.FrameProcessed:
+                    this.handleFrameProcessed(data);
+                    break;
+                case MessageType.DecoderRecovered:
+                    this.handleDecoderRecovery(data);
+                    break;
+            }
+        };
+
+        this.worker.onerror = (error) => {
+            this.handleDecoderError(error);
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ 
+                type: MessageType.DecoderInit,
+                data: this.config
+            });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+
+        const token = tf.zeros([1, 32]);
+
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    private async getNextFrameData(): Promise<FrameData> {
+        try {
+            if (this.lastProcessedFrame) {
+                this.lastProcessedFrame.dispose();
+                this.lastProcessedFrame = null;
+            }
+
+            const inputTensor = await this.prepareInputTensor();
+            const startTime = performance.now();
+            const outputTensor = await this.model!.executeAsync(inputTensor) as tf.Tensor;
+            const inferenceTime = performance.now() - startTime;
+            const processedData = await this.processModelOutput(outputTensor);
+            
+            inputTensor.dispose();
+            outputTensor.dispose();
+
+            this.frameIndex = (this.frameIndex + 1) % this.bufferSize;
+
+            return {
+                frameIndex: this.frameIndex,
+                timestamp: Date.now(),
+                data: processedData,
+                metadata: {
+                    inferenceTime,
+                    inputShape: this.modelConfig.inputShape,
+                    outputShape: processedData.shape
+                }
+            };
+        } catch (error) {
+            console.error('Error getting next frame:', error);
+            throw new Error(`Frame processing failed: ${error}`);
+        }
+    }
+
+    private async processFrame(): Promise<void> {
+        if (!this.model || this.status !== PlayerStatus.Playing) return;
+
+        try {
+            const frameData = await this.getNextFrameData();
+            this.worker.postMessage({
+                type: MessageType.ProcessFrame,
+                data: [{
+                    token: Array.from(frameData.data.values),
+                    frame_index: frameData.frameIndex
+                }]
+            });
+        } catch (error) {
+            this.handleDecoderError(error);
+        }
+    }
+
+    private handleFrameProcessed(data: any) {
+        if (this.frameCallback) {
+            this.frameCallback(data.frameStats);
+        }
+
+        if (this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private handleDecoderError(error: any) {
+        console.error('Decoder error:', error);
+        if (this.errorCallback) {
+            this.errorCallback(new Error(String(error)));
+        }
+    }
+
+    private handleDecoderRecovery(data: any) {
+        console.log('Decoder recovered:', data);
+        if (data.success && this.status === PlayerStatus.Playing) {
+            this.requestNextFrame();
+        }
+    }
+
+    private requestNextFrame() {
+        const now = performance.now();
+        const timeSinceLastFrame = now - this.lastFrameTime;
+
+        if (timeSinceLastFrame >= 16.67) { // Target 60fps
+            this.processFrame();
+            this.lastFrameTime = now;
+        } else {
+            setTimeout(() => this.requestNextFrame(), 16.67 - timeSinceLastFrame);
+        }
+    }
+
+    public setModelConfig(config: Partial<ModelInputConfig>) {
+        this.modelConfig = {
+            ...this.modelConfig,
+            ...config
+        };
+    }
+
+    public getBufferStatus(): {current: number, total: number} {
+        return {
+            current: this.frameBuffer.length,
+            total: this.bufferSize
+        };
+    }
+
+    public onFrameProcessed(callback: (stats: FrameStats) => void) {
+        this.frameCallback = callback;
+    }
+
+    public onError(callback: (error: Error) => void) {
+        this.errorCallback = callback;
+    }
+
+    public async start() {
+        if (this.status !== PlayerStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+        await this.preloadFrames();
+        this.status = PlayerStatus.Playing;
+        this.requestNextFrame();
+    }
+
+    public stop() {
+        this.status = PlayerStatus.Ready;
+    }
+
+    public async destroy() {
+        this.stop();
+        await this.cleanupResources();
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+
+    // Additional helper methods
+    private async prepareInputTensor(): Promise<tf.Tensor> {
+        return tf.tidy(() => {
+            let inputTensor = tf.randomNormal(this.modelConfig.inputShape);
+            if (this.modelConfig.inputNormalization) {
+                const { mean, std } = this.modelConfig.inputNormalization;
+                inputTensor = tf.sub(inputTensor, mean);
+                inputTensor = tf.div(inputTensor, std);
+            }
+            if (inputTensor.shape[0] !== 1) {
+                inputTensor = tf.expandDims(inputTensor, 0);
+            }
+            this.lastProcessedFrame = inputTensor;
+            return inputTensor;
+        });
+    }
+
+    private async processModelOutput(outputTensor: tf.Tensor): Promise<tf.TensorBuffer<tf.Rank>> {
+        const outputData = await outputTensor.buffer();
+        await this.applyPostProcessing(outputData);
+        return outputData;
+    }
+
+    private async applyPostProcessing(data: tf.TensorBuffer<tf.Rank>): Promise<void> {
+        tf.tidy(() => {
+            if (this.modelConfig.outputDenormalization) {
+                const { scale, offset } = this.modelConfig.outputDenormalization;
+                for (let i = 0; i < data.size; i++) {
+                    const value = data.values[i];
+                    data.values[i] = value * scale + offset;
+                }
+            }
+            for (let i = 0; i < data.size; i++) {
+                data.values[i] = Math.max(0, Math.min(1, data.values[i]));
+            }
+        });
+    }
+
+    private async cleanupResources(): Promise<void> {
+        await this.clearBuffer();
+        if (this.lastProcessedFrame) {
+            this.lastProcessedFrame.dispose();
+            this.lastProcessedFrame = null;
+        }
+        tf.engine().startScope();
+        tf.engine().endScope();
+    }
+
+    public async preloadFrames(count: number = this.bufferSize): Promise<void> {
+        for (let i = 0; i < count; i++) {
+            try {
+                const frameData = await this.getNextFrameData();
+                this.frameBuffer.push(frameData);
+            } catch (error) {
+                console.error(`Failed to preload frame ${i}:`, error);
+                break;
+            }
+        }
+    }
+
+    public async clearBuffer(): Promise<void> {
+        this.frameBuffer.forEach(frame => {
+            if (frame.data instanceof tf.Tensor) {
+                frame.data.dispose();
+            }
+        });
+        this.frameBuffer = [];
+        this.frameIndex = 0;
+    }
+}
+import * as tf from '@tensorflow/tfjs';
+import { PlayerStatus, MessageType, ReferenceData } from '../types';
+
+export class IMFPlayer {
+    private worker: Worker;
+    private status: PlayerStatus = PlayerStatus.Idle;
+    private model: tf.GraphModel | null = null;
+    private callbacks: Map<string, Function> = new Map();
+
+    constructor(width: number, height: number) {
+        this.worker = new Worker(new URL('./decoder.worker', import.meta.url));
+        this.setupWorkerListeners();
+    }
+
+    private setupWorkerListeners() {
+        this.worker.onmessage = (event) => {
+            const { type, data, error } = event.data;
+            
+            const callback = this.callbacks.get(type);
+            if (callback) {
+                callback(data);
+                this.callbacks.delete(type);
+            }
+
+            switch (type as MessageType) {
+                case MessageType.DecoderCreated:
+                    this.status = PlayerStatus.Ready;
+                    break;
+                case MessageType.Error:
+                    console.error('Decoder error:', error);
+                    break;
+            }
+        };
+    }
+
+    async initialize(): Promise<void> {
+        return new Promise((resolve, reject) => {
+            this.callbacks.set(MessageType.DecoderInited, resolve);
+            this.worker.postMessage({ type: MessageType.DecoderInit });
+        });
+    }
+
+    async loadModel(modelUrl: string): Promise<boolean> {
+        try {
+            this.model = await tf.loadGraphModel(modelUrl);
+            const referenceData = this.createReferenceData();
+            
+            return new Promise((resolve, reject) => {
+                this.callbacks.set(MessageType.ReferenceDataSet, (status: boolean) => {
+                    resolve(status);
+                });
+
+                this.worker.postMessage({
+                    type: MessageType.DecoderInit,
+                    data: referenceData
+                });
+            });
+        } catch (error) {
+            console.error('Failed to load model:', error);
+            return false;
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        const features = [
+            tf.zeros([1, 128, 64, 64]),
+            tf.zeros([1, 256, 32, 32]),
+            tf.zeros([1, 512, 16, 16]),
+            tf.zeros([1, 512, 8, 8])
+        ];
+        const token = tf.zeros([1, 32]);
+
+        return {
+            features: features.map(tensor => ({
+                tensor: tensor.dataSync() as Float32Array,
+                shape: tensor.shape
+            })),
+            token: token.dataSync() as Float32Array
+        };
+    }
+
+    async processFrame(inputData: Float32Array, inputShape: number[]): Promise<void> {
+        if (!this.model) return;
+
+        try {
+            const inputTensor = tf.tensor(inputData, inputShape);
+            const outputTensor = await this.model.executeAsync(inputTensor);
+            const outputData = await (outputTensor as tf.Tensor).data();
+
+            return new Promise((resolve) => {
+                this.callbacks.set(MessageType.TokensProcessed, resolve);
+                
+                this.worker.postMessage({
+                    type: MessageType.TokensProcessed,
+                    data: [{
+                        token: Array.from(outputData),
+                        frame_index: 0
+                    }]
+                });
+            });
+        } catch (error) {
+            console.error('Error processing frame:', error);
+        }
+    }
+
+    destroy() {
+        if (this.model) {
+            this.model.dispose();
+        }
+        this.worker.terminate();
+        this.status = PlayerStatus.Destroyed;
+    }
+}
+
+// js/decoder/worker.ts
+import init, { IMFDecoder } from '../../pkg/imf_decoder';
+import { MessageType, DecoderStatus } from '../types';
+
+class DecoderWorkerInstance {
+    private decoder: IMFDecoder | null = null;
+    private status: DecoderStatus = DecoderStatus.Idle;
+
+    async initialize() {
+        try {
+            await init();
+            this.decoder = new IMFDecoder(1920, 1080);
+            this.status = DecoderStatus.Ready;
+            self.postMessage({ type: MessageType.DecoderCreated });
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    handleMessage(event: MessageEvent) {
+        const { type, data } = event.data;
+
+        try {
+            switch (type as MessageType) {
+                case MessageType.DecoderInit:
+                    this.initialize();
+                    break;
+                case MessageType.TokensProcessed:
+                    this.processTokens(data);
+                    break;
+            }
+        } catch (error) {
+            self.postMessage({ 
+                type: MessageType.Error, 
+                error: error instanceof Error ? error.message : String(error)
+            });
+        }
+    }
+
+    async processTokens(tokens: any) {
+        if (!this.decoder || this.status !== DecoderStatus.Ready) {
+            throw new Error('Decoder not ready');
+        }
+
+        const result = await this.decoder.process_tokens(tokens);
+        self.postMessage({ type: MessageType.TokensProcessed, result });
+
+        const batchResult = await this.decoder.process_batch();
+        self.postMessage({ type: MessageType.BatchProcessed, result: batchResult });
+    }
+}
+
+const worker = new DecoderWorkerInstance();
+self.onmessage = (event) => worker.handleMessage(event);
+declare module '@pkg/imf_decoder' {
+    export interface ReferenceFeature {
+        tensor: Float32Array;
+        shape: number[];
+    }
+
+    export interface ReferenceData {
+        features: ReferenceFeature[];
+        token: Float32Array;
+    }
+
+    export interface FrameToken {
+        token: Float32Array | number[];
+        frame_index: number;
+    }
+
+    export interface DecoderStatus {
+        initialized: boolean;
+        running: boolean;
+        metrics: {
+            frameCount: number;
+            lastFrameTime: number;
+        };
+        queue: {
+            inputQueueSize: number;
+            processingQueueSize: number;
+            outputQueueSize: number;
+        };
+    }
+
+    export interface DecoderCapabilities {
+        version: string;
+        dimensions: string;
+        features: string[];
+        methods: string[];
+    }
+
+    export class IMFDecoder {
+        constructor(width: number, height: number);
+        free(): void;
+        initialize_render_context(canvas: HTMLCanvasElement): Promise<string>;
+        get_capabilities(): DecoderCapabilities;
+        test(): string;
+        get_status(): DecoderStatus;
+        start_player_loop(): Promise<void>;
+        stop_player_loop(): void;
+        diagnostic_mode: boolean;
+        set_reference_data(data: ReferenceData): Promise<string>;
+        process_tokens(tokens: FrameToken[]): Promise<string>;
+        process_batch(): Promise<string>;
+        get_reference_status(): string;
+    }
+
+    export function initSync(): void;
+    export function start(): void;
+    export default function init(): Promise<void>;
+}
+// js/types/index.ts
+import * as tf from '@tensorflow/tfjs';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
+// Enums
+export enum PlayerStatus {
+  Idle = 0,
+  Ready = 1,
+  Playing = 2,
+  Pause = 3,
+  Destroyed = 4
+}
+
+export enum DecoderStatus {
+  Idle = 0,
+  Initializing = 1,
+  Ready = 2,
+  Open = 3,
+  Pause = 4,
+  Closed = 5
+}
+
+
+
+// Configuration Interfaces
+export interface DecoderConfig {
+  width: number;
+  height: number;
+  maxQueueSize?: number;
+  batchSize?: number;
+  enablePerfMonitoring?: boolean;
+}
+
+// Data Structure Interfaces 
+export interface ReferenceFeature {
+  tensor: Float32Array;
+  shape: number[];
+}
+
+export interface ReferenceData {
+  features: ReferenceFeature[];
+  token: Float32Array;
+}
+
+export interface FrameToken {
+  token: Float32Array;
+  frame_index: number;
+}
+
+// WASM Related Interfaces
+export interface WasmModule {
+  IMFDecoder: new (width: number, height: number) => IMFDecoder;
+  default: () => Promise<void>;
+  [key: string]: any;
+}
+
+
+
+// Result Interfaces
+export interface VerifyResult {
+  success: boolean;
+  module?: WasmModule;
+  decoder?: IMFDecoder;
+  error?: Error;
+}
+
+export interface TestResult {
+  success: boolean;
+  message?: string;
+  error?: string;
+}
+
+// Worker Message Interface
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
+  error?: string;
+}
+
+
+export enum MessageType {
+  DecoderInit = 'DecoderInit',
+  DecoderInited = 'DecoderInited',
+  ProcessFrame = 'ProcessFrame',
+  FrameProcessed = 'FrameProcessed',
+  UpdateRenderPass = 'UpdateRenderPass',
+  DecoderError = 'DecoderError',
+  DecoderRecovered = 'DecoderRecovered',
+  DecoderMetrics = 'DecoderMetrics',
+  DecoderCreated = 'DecoderCreated',
+  WasmLoaded = 'WasmLoaded',
+  DecoderReady = 'DecoderReady',
+  ReferenceDataSet = 'ReferenceDataSet',
+  TokensProcessed = 'TokensProcessed',
+  BatchProcessed = 'BatchProcessed',
+  Error = 'Error'
+}
+
+export interface WorkerMessage {
+  type: MessageType;
+  data?: any;
+  error?: string;
+}
+
+export interface FrameStats {
+  frameTime: number;        // Time to process frame
+  gpuTime: number;         // GPU processing time
+  frameCount: number;      // Total frames processed
+  droppedFrames: number;   // Frames exceeding timing budget
+  lastFrameTimestamp: number;
+}
+
+export interface RenderPassConfig {
+  name: string;
+  format: GPUTextureFormat;
+  descriptors: {
+      colorAttachments: Array<{
+          clearValue: GPUColor;
+          loadOp: GPULoadOp;
+          storeOp: GPUStoreOp;
+      }>;
+  };
+}
+
+export interface TextureDescriptor {
+  id: number;
+  width: number;
+  height: number;
+  format: GPUTextureFormat;
+  usage: GPUTextureUsageFlags;
+}
+
+export interface ModelInputConfig {
+  inputShape: number[];
+  inputNormalization?: {
+      mean: number[];
+      std: number[];
+  };
+  outputDenormalization?: {
+      scale: number;
+      offset: number;
+  };
+  maxBatchSize: number;
+}
+
+export interface FrameData {
+  frameIndex: number;
+  timestamp: number;
+  data: tf.TensorBuffer<tf.Rank>;
+  metadata: {
+      inferenceTime: number;
+      inputShape: number[];
+      outputShape: number[];
+  };
+}
+
+declare module '*.wasm' {
+  const content: WebAssembly.Module;
+  export default content;
+}
+
+
+import init   from '@pkg/imf_decoder';
+import {IMFDecoder}   from '@pkg/imf_decoder';
+import type { VerifyResult, TestResult } from '../types';
+
+async function verifyWasmBuild(): Promise<VerifyResult> {
+    console.log('🔍 Starting WASM verification...');
+    
+    try {
+        await init();
+        const exports = Object.keys(await import('@pkg/imf_decoder'));
+        console.log('📦 WASM Exports:', exports);
+
+        const width = 640;
+        const height = 480;
+        console.log(`Creating new IMF decoder with dimensions ${width}x${height}`);
+        
+        const decoder = new IMFDecoder(width, height);
+        const methods = Object.getOwnPropertyNames(IMFDecoder.prototype);
+        console.log('🔧 IMFDecoder Methods:', methods);
+
+        const testResult = decoder.test();
+        console.log('🧪 Test method output:', testResult);
+        console.log('IMFDecoder instance:', decoder);
+
+        if (!testResult.includes('IMFDecoder working!')) {
+            throw new Error('Decoder test failed');
+        }
+
+        console.log('✅ WASM verification successful!');
+        return {
+            success: true,
+            decoder
+        };
+    } catch (error) {
+        console.error('❌ WASM verification failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error : new Error('Unknown error')
+        };
+    }
+}
+
+ async function runDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+  try {
+      console.log('Available methods:', Object.getOwnPropertyNames(IMFDecoder.prototype));
+      
+      // Test 1: Basic functionality
+      const initialTest = decoder.test();
+      console.log('Initial test:', initialTest);
+
+      // Test 2: Set diagnostic mode
+      console.log('Setting diagnostic mode...');
+      decoder.diagnostic_mode = true;
+      console.log('Diagnostic mode set to:', decoder.diagnostic_mode);
+      
+      if (!decoder.diagnostic_mode) {
+          throw new Error('Failed to set diagnostic mode');
+      }
+      console.log('Diagnostic mode is now:', decoder.diagnostic_mode);
+
+      // Test 3: Set reference data
+      console.log('Setting reference data...');
+      const referenceData = {
+          features: [
+              {
+                  tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                  shape: [1, 128, 64, 64]
+              },
+              {
+                  tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                  shape: [1, 256, 32, 32]
+              },
+              {
+                  tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                  shape: [1, 512, 16, 16]
+              },
+              {
+                  tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                  shape: [1, 512, 8, 8]
+              }
+          ],
+          token: new Float32Array(32).fill(0.1)
+      };
+
+      const refResult = await decoder.set_reference_data(referenceData);
+      console.log('Set reference data result:', refResult);
+
+      // Test 4: Process test frame
+      console.log('Processing tokens...');
+      const frameWidth = 640;
+      const frameHeight = 480;
+      const channelCount = 4; // RGBA
+      const frameData = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+
+      if (typeof decoder.process_tokens !== 'function') {
+          throw new Error('process_tokens method not found on decoder');
+      }
+      console.log('process_tokens exists:', typeof decoder.process_tokens);
+
+      const tokenResult = await decoder.process_tokens([{
+          token: frameData,
+          frame_index: 0
+      }]);
+
+      // Test 5: Process batch
+      const batchResult = await decoder.process_batch();
+
+      return {
+          success: true,
+          message: 'All decoder tests completed successfully'
+      };
+
+  } catch (error) {
+      console.error('Error processing tokens:', error);
+      console.error('Stack:', error);
+      console.error('Test sequence failed:', error);
+      return {
+          success: false,
+          error: error instanceof Error ? error.message : String(error)
+      };
+  }
+}
+
+async function initializeDecoder(): Promise<void> {
+  try {
+      console.log('🔍 Starting WASM verification...');
+      const { success, module: wasm_module, decoder, error } = await verifyWasmBuild();
+      
+      if (!success || !decoder) {
+          console.error('Failed to initialize decoder:', error);
+          if (error?.stack) console.error('Stack:', error.stack);
+          return;
+      }
+
+      console.log('IMFDecoder instance:', decoder);
+      console.log('✅ WASM verification successful!');
+      
+      // Store for later use
+      (window as any).decoder = decoder;
+      (window as any).wasm = wasm_module;
+      
+      // Run decoder tests
+      await runDecoderTests(decoder);
+      
+      console.log('IMFDecoder initialized successfully');
+  } catch (e) {
+      console.error('Failed to initialize decoder:', e);
+      if (e instanceof Error) console.error('Stack:', e.stack);
+      
+      try {
+          // Additional debugging info
+          const wasm_module = await import('@pkg/imf_decoder');
+      
+          // Wait for module initialization
+          await init();
+          
+          // Log all available exports
+          console.log('📦 WASM Exports:', Object.keys(wasm_module));
+      } catch (importError) {
+          console.error('Failed to import WASM module:', importError);
+      }
+  }
+}
+
+
+
+async function testAnimationFrame(decoder: IMFDecoder): Promise<TestResult> {
+    console.log('🎬 Starting animation frame test...');
+    
+    try {
+        // Track frame count and timing
+        let frameCount = 0;
+        let startTime = performance.now();
+        let lastFrameTime = startTime;
+        const testDuration = 3000; // Run test for 3 seconds
+        const targetFPS = 60;
+        const frameTimings: number[] = [];
+
+        // Create test data
+        const referenceData = {
+            features: [
+                {
+                    tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                    shape: [1, 128, 64, 64]
+                },
+                {
+                    tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                    shape: [1, 256, 32, 32]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                    shape: [1, 512, 16, 16]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                    shape: [1, 512, 8, 8]
+                }
+            ],
+            token: new Float32Array(32).fill(0.1)
+        };
+
+        // Set up decoder
+        console.log('Setting reference data...');
+        await decoder.set_reference_data(referenceData);
+        decoder.diagnostic_mode = true;
+
+        // Create a promise that resolves when the animation test is complete
+        const animationTest = new Promise<void>((resolve) => {
+            function animationFrame(timestamp: number) {
+                const currentTime = performance.now();
+                const elapsed = currentTime - startTime;
+                const frameDuration = currentTime - lastFrameTime;
+                
+                // Process frame
+                const frameData = new Float32Array(640 * 480 * 4).fill(0.5);
+                decoder.process_tokens([{
+                    token: Array.from(frameData),
+                    frame_index: frameCount
+                }]);
+                
+                // Track metrics
+                frameCount++;
+                frameTimings.push(frameDuration);
+                lastFrameTime = currentTime;
+
+                // Continue animation if test duration hasn't elapsed
+                if (elapsed < testDuration) {
+                    requestAnimationFrame(animationFrame);
+                } else {
+                    resolve();
+                }
+            }
+
+            // Start animation loop
+            requestAnimationFrame(animationFrame);
+        });
+
+        // Wait for animation test to complete
+        await animationTest;
+
+        // Calculate test results
+        const averageFrameTime = frameTimings.reduce((a, b) => a + b, 0) / frameTimings.length;
+        const measuredFPS = 1000 / averageFrameTime;
+        const minFrameTime = Math.min(...frameTimings);
+        const maxFrameTime = Math.max(...frameTimings);
+        const frameTimeJitter = maxFrameTime - minFrameTime;
+
+        // Log results
+        console.log('🎥 Animation test completed:');
+        console.log(`Frames processed: ${frameCount}`);
+        console.log(`Average frame time: ${averageFrameTime.toFixed(2)}ms`);
+        console.log(`Measured FPS: ${measuredFPS.toFixed(2)}`);
+        console.log(`Frame time range: ${minFrameTime.toFixed(2)}ms - ${maxFrameTime.toFixed(2)}ms`);
+        console.log(`Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`);
+
+        // Verify test results
+        const performanceThreshold = 0.8; // 80% of target performance
+        const targetFrameTime = 1000 / targetFPS;
+        const isPerformant = averageFrameTime <= targetFrameTime / performanceThreshold;
+        const isStable = frameTimeJitter < targetFrameTime;
+
+        if (!isPerformant || !isStable) {
+            throw new Error(
+                `Performance targets not met:\n` +
+                `Average frame time: ${averageFrameTime.toFixed(2)}ms (target: ${targetFrameTime}ms)\n` +
+                `Frame time jitter: ${frameTimeJitter.toFixed(2)}ms`
+            );
+        }
+
+        return {
+            success: true,
+            message: `Animation test completed successfully:\n` +
+                    `Processed ${frameCount} frames at ${measuredFPS.toFixed(1)} FPS\n` +
+                    `Frame time: ${averageFrameTime.toFixed(1)}ms ±${(frameTimeJitter/2).toFixed(1)}ms`
+        };
+
+    } catch (error) {
+        console.error('❌ Animation test failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+// Update the main test function to include animation testing
+async function runEnhancedDecoderTests(decoder: IMFDecoder): Promise<TestResult> {
+    try {
+        // Run existing decoder tests first
+        const basicTests = await runDecoderTests(decoder);
+        if (!basicTests.success) {
+            throw new Error(`Basic decoder tests failed: ${basicTests.error}`);
+        }
+
+        // Run animation frame test
+        console.log('Running animation frame test...');
+        const animationTest = await testAnimationFrame(decoder);
+        if (!animationTest.success) {
+            throw new Error(`Animation test failed: ${animationTest.error}`);
+        }
+
+        return {
+            success: true,
+            message: `All tests completed successfully.\n${animationTest.message}`
+        };
+
+    } catch (error) {
+        console.error('Test sequence failed:', error);
+        return {
+            success: false,
+            error: error instanceof Error ? error.message : String(error)
+        };
+    }
+}
+
+
+// Initialize when page loads
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initializeDecoder);
+} else {
+  initializeDecoder();
+}
+
+export { initializeDecoder, verifyWasmBuild, runDecoderTests, runEnhancedDecoderTests, testAnimationFrame };
+// js/utils/performance-monitor.ts
+import * as tf from '@tensorflow/tfjs';
+
+export class PerformanceMonitor {
+    private metrics: {
+        fps: number[];
+        inferenceTime: number[];
+        memoryUsage: number[];
+        tensorCount: number[];
+    } = {
+        fps: [],
+        inferenceTime: [],
+        memoryUsage: [],
+        tensorCount: []
+    };
+
+    private readonly maxSamples: number = 60; // 1 second at 60fps
+    private lastFrameTime: number = 0;
+
+    public recordMetrics(inferenceTime: number): void {
+        const now = performance.now();
+        
+        // Calculate FPS
+        if (this.lastFrameTime > 0) {
+            const fps = 1000 / (now - this.lastFrameTime);
+            this.pushMetric('fps', fps);
+        }
+        this.lastFrameTime = now;
+
+        // Record inference time
+        this.pushMetric('inferenceTime', inferenceTime);
+
+        // Record memory usage
+        this.recordMemoryUsage();
+    }
+
+    private recordMemoryUsage(): void {
+        const memoryInfo = tf.memory();
+        this.pushMetric('memoryUsage', memoryInfo.numBytes);
+        this.pushMetric('tensorCount', memoryInfo.numTensors);
+    }
+
+    private pushMetric(key: keyof typeof this.metrics, value: number): void {
+        this.metrics[key].push(value);
+        if (this.metrics[key].length > this.maxSamples) {
+            this.metrics[key].shift();
+        }
+    }
+
+    public getAverageMetrics(): {[key: string]: number} {
+        const result: {[key: string]: number} = {};
+        
+        for (const [key, values] of Object.entries(this.metrics)) {
+            if (values.length > 0) {
+                const sum = values.reduce((a, b) => a + b, 0);
+                result[key] = sum / values.length;
+            }
+        }
+
+        return result;
+    }
+
+    public getMetricsReport(): string {
+        const averages = this.getAverageMetrics();
+        return `
+Performance Report:
+------------------
+FPS: ${averages.fps.toFixed(2)}
+Inference Time: ${averages.inferenceTime.toFixed(2)}ms
+Memory Usage: ${(averages.memoryUsage / 1024 / 1024).toFixed(2)}MB
+Active Tensors: ${averages.tensorCount}
+        `.trim();
+    }
+
+    public reset(): void {
+        Object.keys(this.metrics).forEach(key => {
+            this.metrics[key as keyof typeof this.metrics] = [];
+        });
+        this.lastFrameTime = 0;
+    }
+}
+import { init, verifyWasmBuild, runDecoderTests } from './utils/wasm-test';
+import { 
+    WasmModule,  
+    ReferenceData, 
+    FrameToken, 
+    VerifyResult,
+    TestResult,
+    PlayerStatus,
+    DecoderStatus 
+} from './types';
+import { IMFDecoder, ReferenceData as WasmReferenceData, FrameToken as WasmFrameToken } from '@pkg/imf_decoder';
+
+
+class TestUI {
+    private decoder: IMFDecoder | null = null;
+    private playerStatus: PlayerStatus = PlayerStatus.Idle;
+    private decoderStatus: DecoderStatus = DecoderStatus.Idle;
+    private animationFrameId: number | null = null;
+    private frameCount: number = 0;
+    private canvas: HTMLCanvasElement | null = null;
+
+    private buttons!: {
+        verify: HTMLButtonElement;
+        init: HTMLButtonElement;
+        start: HTMLButtonElement;
+        process: HTMLButtonElement;
+        pause: HTMLButtonElement;
+        clear: HTMLButtonElement;
+    };
+
+    private statusElements!: {
+        player: HTMLElement;
+        decoder: HTMLElement;
+    };
+
+    constructor() {
+        this.setupLayout();
+        this.initializeElements();
+        this.setupEventListeners();
+        // this.interceptConsole();
+    }
+
+    private setupLayout() {
+        document.body.innerHTML = `
+        <div class="container">
+            <div class="left-panel">
+                <h1>IMF Decoder Test</h1>
+                <div class="status-panel">
+                    <div class="status-item">
+                        <span class="status-label">Player Status:</span>
+                        <span id="player-status" class="status-value status-idle">Idle</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">Decoder Status:</span>
+                        <span id="decoder-status" class="status-value status-idle">Idle</span>
+                    </div>
+                </div>
+                <canvas id="decoder-canvas"></canvas>
+                <div class="button-group">
+                    <button id="verifyWasm">Verify WASM</button>
+                    <button id="initDecoder" disabled>Initialize Decoder</button>
+                    <button id="startDecoder" disabled>Start Decoder</button>
+                    <button id="processFrame" disabled>Process Frame</button>
+                    <button id="pauseDecoder" disabled>Pause Decoder</button>
+                    <button id="clearLog">Clear Log</button>
+                </div>
+            </div>
+            <div class="right-panel">
+                <div class="log-header">
+                    <h2>Decoder Log</h2>
+                </div>
+                <div id="log" class="log-content"></div>
+            </div>
+        </div>
+    `;
+
+        const style = document.createElement('style');
+        style.textContent = `
+         #decoder-canvas {
+            display: block;
+            margin: 20px auto;
+            max-width: 100%;
+            height: auto;
+            border: 1px solid #ccc;
+        }
+            .container {
+                display: flex;
+                gap: 20px;
+                padding: 20px;
+                max-width: 1400px;
+                margin: 0 auto;
+                height: calc(100vh - 40px);
+            }
+
+            .left-panel {
+                flex: 1;
+                min-width: 400px;
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+
+            .right-panel {
+                flex: 1;
+                min-width: 400px;
+                display: flex;
+                flex-direction: column;
+                border-left: 1px solid #ccc;
+                padding-left: 20px;
+            }
+
+            .status-panel {
+                background: #f8f9fa;
+                padding: 15px;
+                border-radius: 8px;
+                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            }
+
+            .status-item {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+
+            .status-label {
+                font-weight: bold;
+            }
+
+            .status-value {
+                padding: 4px 12px;
+                border-radius: 12px;
+                font-size: 14px;
+            }
+
+            .status-idle { background: #ffd700; }
+            .status-ready { background: #90ee90; }
+            .status-playing { background: #87ceeb; }
+            .status-paused { background: #ffb6c1; }
+
+            #decoder-canvas {
+                width: 100%;
+                max-width: 640px;
+                height: auto;
+                border: 1px solid #ccc;
+                border-radius: 4px;
+                margin: 0 auto;
+            }
+
+            .button-group {
+                display: grid;
+                grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+                gap: 10px;
+            }
+
+            button {
+                padding: 10px;
+                border: none;
+                border-radius: 4px;
+                background: #4285f4;
+                color: white;
+                cursor: pointer;
+                transition: background 0.2s;
+            }
+
+            button:hover:not(:disabled) {
+                background: #3367d6;
+            }
+
+            button:disabled {
+                background: #ccc;
+                cursor: not-allowed;
+            }
+
+            .log-header {
+                padding: 10px 0;
+                border-bottom: 1px solid #eee;
+                margin-bottom: 10px;
+            }
+
+            .log-content {
+                flex: 1;
+                overflow-y: auto;
+                background: #f8f9fa;
+                padding: 10px;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 13px;
+                line-height: 1.5;
+            }
+
+            .info { color: #4285f4; }
+            .error { color: #dc3545; }
+            .success { color: #28a745; }
+
+            h1, h2 {
+                margin: 0 0 20px 0;
+                color: #333;
+            }
+        `;
+        document.head.appendChild(style);
+
+        // Setup canvas after layout
+        this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
+        if (this.canvas) {
+            this.canvas.width = 640;
+            this.canvas.height = 480;
+        }
+    }
+
+    private async checkWebGPUSupport(): Promise<boolean> {
+        if (!navigator.gpu) {
+            this.log('error', 'WebGPU is not supported in this browser');
+            return false;
+        }
+
+        try {
+            const adapter = await navigator.gpu.requestAdapter({
+                powerPreference: 'high-performance'
+            });
+
+            if (!adapter) {
+                this.log('error', 'No WebGPU adapter found');
+                return false;
+            }
+
+            const device = await adapter.requestDevice();
+            if (!device) {
+                this.log('error', 'Failed to get WebGPU device');
+                return false;
+            }
+
+            this.log('success', 'WebGPU is supported and initialized');
+            return true;
+        } catch (error) {
+            this.log('error', `WebGPU initialization failed: ${error}`);
+            return false;
+        }
+    }
+    
+    
+
+
+    private initializeElements() {
+        // Verify all elements exist before assignment
+        const verifyBtn = document.getElementById('verifyWasm');
+        const initBtn = document.getElementById('initDecoder');
+        const startBtn = document.getElementById('startDecoder');
+        const processBtn = document.getElementById('processFrame');
+        const pauseBtn = document.getElementById('pauseDecoder');
+        const clearBtn = document.getElementById('clearLog');
+        const playerStatus = document.getElementById('player-status');
+        const decoderStatus = document.getElementById('decoder-status');
+
+        if (!verifyBtn || !initBtn || !startBtn || !processBtn || 
+            !pauseBtn || !clearBtn || !playerStatus || !decoderStatus) {
+            throw new Error('Required DOM elements not found');
+        }
+
+        this.buttons = {
+            verify: verifyBtn as HTMLButtonElement,
+            init: initBtn as HTMLButtonElement,
+            start: startBtn as HTMLButtonElement,
+            process: processBtn as HTMLButtonElement,
+            pause: pauseBtn as HTMLButtonElement,
+            clear: clearBtn as HTMLButtonElement
+        };
+
+        this.statusElements = {
+            player: playerStatus,
+            decoder: decoderStatus
+        };
+    }
+
+    private interceptConsole() {
+        const originalLog = console.log;
+        const originalError = console.error;
+        const originalWarn = console.warn;
+
+        console.log = (...args: any[]) => {
+            this.log('info', ...args);
+            originalLog.apply(console, args);
+        };
+
+        console.error = (...args: any[]) => {
+            this.log('error', ...args);
+            originalError.apply(console, args);
+        };
+
+        console.warn = (...args: any[]) => {
+            this.log('info', ...args);
+            originalWarn.apply(console, args);
+        };
+    }
+
+
+
+    private setupEventListeners() {
+        this.buttons.verify.onclick = () => this.verifyWasm();
+        this.buttons.init.onclick = () => this.initializeDecoder();
+        this.buttons.start.onclick = () => this.startDecoder();
+        this.buttons.process.onclick = () => this.processFrame();
+        this.buttons.pause.onclick = () => this.pauseDecoder();
+        this.buttons.clear.onclick = () => this.clearLog();
+    }
+
+    private updateStatus(type: 'player' | 'decoder', status: PlayerStatus | DecoderStatus) {
+        const element = this.statusElements[type];
+        const statusMap = type === 'player' ? PlayerStatus : DecoderStatus;
+        const statusName = statusMap[status];
+        
+        // Remove all existing status classes
+        element.className = 'status-value';
+        
+        // Add appropriate status class
+        switch(status) {
+            case 0: element.classList.add('status-idle'); break;
+            case 1: element.classList.add('status-ready'); break;
+            case 2: element.classList.add('status-playing'); break;
+            case 3: element.classList.add('status-paused'); break;
+            default: element.classList.add('status-error');
+        }
+        
+        element.textContent = statusName;
+    }
+
+    private async verifyWasm() {
+        try {
+            this.buttons.verify.disabled = true;
+            this.log('info', 'Verifying WASM...');
+            
+            const result = await verifyWasmBuild();
+            if (result.success && result.decoder) {
+                this.decoder = result.decoder;
+                this.buttons.init.disabled = false;
+                this.updateStatus('player', PlayerStatus.Ready);
+                this.log('success', 'WASM verification successful!');
+            } else {
+                this.updateStatus('player', PlayerStatus.Idle);
+                this.log('error', 'WASM verification failed!');
+            }
+        } catch (error) {
+            this.log('error', `Error: ${error.message}`);
+            this.updateStatus('player', PlayerStatus.Idle);
+        } finally {
+            this.buttons.verify.disabled = false;
+        }
+    }
+    
+    
+    private async initializeDecoder() {
+        try {
+            this.buttons.init.disabled = true;
+            this.updateStatus('decoder', DecoderStatus.Initializing);
+            
+            if (!this.decoder || !this.canvas) {
+                throw new Error('Decoder or canvas not initialized');
+            }
+    
+            // Check WebGPU support first
+            const hasWebGPU = await this.checkWebGPUSupport();
+            if (!hasWebGPU) {
+                throw new Error('WebGPU not supported or failed to initialize');
+            }
+    
+            // Configure canvas for WebGPU
+            this.canvas.width = 640;
+            this.canvas.height = 480;
+            
+            // Enable debug mode for testing
+            this.decoder.set_debug_mode(true);
+            
+            // Create and set reference data
+            const referenceData = this.createReferenceData();
+            const refResult = await this.decoder.set_reference_data(referenceData);
+            this.log('info', `Reference data set: ${refResult}`);
+    
+            // Initialize WebGPU context
+            try {
+                const initResult = await this.decoder.initialize_render_context(this.canvas);
+                this.log('info', `Render context initialized: ${initResult}`);
+            } catch (error) {
+                throw new Error(`WebGPU context initialization failed: ${error}`);
+            }
+    
+            // Check decoder status
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Decoder initialization incomplete');
+            }
+    
+            this.buttons.start.disabled = false;
+            this.updateStatus('decoder', DecoderStatus.Ready);
+            this.log('success', 'Decoder initialized successfully in debug mode');
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Initialization error: ${errorMessage}`);
+            this.updateStatus('decoder', DecoderStatus.Idle);
+        } finally {
+            this.buttons.init.disabled = false;
+        }
+    }
+
+    private async processFrame() {
+        if (!this.decoder) return;
+
+        try {
+            const frameWidth = 640;
+            const frameHeight = 480;
+            const channelCount = 4; // RGBA
+            const frameData = new Float32Array(frameWidth * frameHeight * channelCount).fill(0.5);
+            
+            const token: FrameToken = {
+                token: frameData,
+                frame_index: this.frameCount++
+            };
+
+            this.log('info', `Processing frame ${token.frame_index}`);
+            const processResult = await this.decoder.process_tokens([token]);
+            this.log('info', processResult);
+            
+            const batchResult = await this.decoder.process_batch();
+            this.log('success', `Batch processed: ${batchResult}`);
+
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Process error: ${errorMessage}`);
+        }
+    }
+
+    private async startDecoderLoop() {
+        if (!this.decoder || !this.canvas) return;
+
+        try {
+            // Verify render context is initialized
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
+            }
+
+            await this.decoder.start_player_loop();
+            this.updateStatus('decoder', DecoderStatus.Playing);
+            this.log('success', 'Decoder loop started');
+
+            // Start frame processing
+            this.processFrame();
+        } catch (error) {
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            this.log('error', `Start error: ${errorMessage}`);
+            this.updateStatus('decoder', DecoderStatus.Ready);
+        }
+    }
+    
+    private async startDecoder() {
+        try {
+            this.buttons.start.disabled = true;
+            this.updateStatus('decoder', DecoderStatus.Open);
+            
+            if (!this.decoder) {
+                throw new Error('Decoder not initialized');
+            }
+    
+            // Make sure render context is ready before starting the loop
+            const status = await this.decoder.get_status();
+            if (!status.initialized) {
+                throw new Error('Render context not initialized');
+            }
+    
+            // Start the decoder's internal render loop
+            await this.decoder.start_player_loop();
+            
+            // Enable frame processing and pause buttons
+            this.buttons.process.disabled = false;
+            this.buttons.pause.disabled = false;
+            
+            // Start our animation loop
+            this.startDecoderLoop();
+            
+            this.log('success', 'Decoder started');
+        } catch (error:any) {
+            this.log('error', `Start error: ${error.message}`);
+            this.updateStatus('decoder', DecoderStatus.Ready);
+        }
+    }
+
+    // private async startDecoderLoop() {
+    //     if (!this.decoder || !this.canvas) return;
+
+    //     const frameWidth = 640;
+    //     const frameHeight = 480;
+    //     const channelCount = 4; // RGBA
+        
+    //     const animate = async () => {
+    //         try {
+    //             // Create test frame data with changing pattern
+    //             const frame = new Float32Array(frameWidth * frameHeight * channelCount);
+                
+    //             // Create a simple animation pattern
+    //             const time = this.frameCount * 0.05;
+    //             for (let y = 0; y < frameHeight; y++) {
+    //                 for (let x = 0; x < frameWidth; x++) {
+    //                     const i = (y * frameWidth + x) * channelCount;
+    //                     // Create animated gradient pattern
+    //                     frame[i] = (Math.sin(x * 0.01 + time) + 1) * 0.5; // R
+    //                     frame[i + 1] = (Math.cos(y * 0.01 + time) + 1) * 0.5; // G
+    //                     frame[i + 2] = (Math.sin((x + y) * 0.01 + time) + 1) * 0.5; // B
+    //                     frame[i + 3] = 1.0; // A
+    //                 }
+    //             }
+
+    //             const token: FrameToken = {
+    //                 token: frame,
+    //                 frame_index: this.frameCount++
+    //             };
+
+    //             // Process frame through decoder
+    //             await this.decoder.process_tokens([token]);
+    //             await this.decoder.process_batch();
+
+    //             // Request next frame if still playing
+    //             if (this.decoderStatus === DecoderStatus.Open) {
+    //                 this.animationFrameId = requestAnimationFrame(animate);
+    //             }
+
+    //             // Log frame stats every 60 frames
+    //             if (this.frameCount % 60 === 0) {
+    //                 const stats = await this.decoder.get_status();
+    //                 this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(stats)}`);
+    //             }
+
+    //         } catch (error) {
+    //             this.log('error', `Animation error: ${error}`);
+    //             this.pauseDecoder();
+    //         }
+    //     };
+
+    //     // Start animation loop
+    //     this.animationFrameId = requestAnimationFrame(animate);
+    // }
+
+    // private async startDecoder() {
+    //     try {
+    //         this.buttons.start.disabled = true;
+    //         this.updateStatus('decoder', DecoderStatus.Open);
+            
+    //         if (!this.decoder) {
+    //             throw new Error('Decoder not initialized');
+    //         }
+
+    //         // Enable frame processing and pause buttons
+    //         this.buttons.process.disabled = false;
+    //         this.buttons.pause.disabled = false;
+            
+    //         // Start the decoder's internal render loop
+    //         await this.decoder.start_player_loop();
+            
+    //         // Start our animation loop
+    //         this.startDecoderLoop();
+            
+    //         this.log('success', 'Decoder started');
+    //     } catch (error:any) {
+    //         this.log('error', `Start error: ${error.message}`);
+    //         this.updateStatus('decoder', DecoderStatus.Ready);
+    //     }
+    // }
+
+    private async pauseDecoder() {
+        try {
+            this.updateStatus('decoder', DecoderStatus.Pause);
+            
+            // Stop animation loop
+            if (this.animationFrameId !== null) {
+                cancelAnimationFrame(this.animationFrameId);
+                this.animationFrameId = null;
+            }
+
+            // Stop decoder's internal render loop
+            if (this.decoder) {
+                this.decoder.stop_player_loop();
+            }
+
+            this.buttons.process.disabled = true;
+            this.buttons.pause.disabled = true;
+            this.buttons.start.disabled = false;
+            
+            this.log('info', 'Decoder paused');
+        } catch (error) {
+            this.log('error', `Pause error: ${error.message}`);
+        }
+    }
+
+    private createReferenceData(): ReferenceData {
+        return {
+            features: [
+                {
+                    tensor: new Float32Array(1 * 128 * 64 * 64).fill(0.5),
+                    shape: [1, 128, 64, 64]
+                },
+                {
+                    tensor: new Float32Array(1 * 256 * 32 * 32).fill(0.5),
+                    shape: [1, 256, 32, 32]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 16 * 16).fill(0.5),
+                    shape: [1, 512, 16, 16]
+                },
+                {
+                    tensor: new Float32Array(1 * 512 * 8 * 8).fill(0.5),
+                    shape: [1, 512, 8, 8]
+                }
+            ],
+            token: new Float32Array(32).fill(0.1)
+        };
+    }
+
+    private log(type: 'info' | 'error' | 'success', ...args: any[]) {
+        const logDiv = document.getElementById('log')!;
+        const line = document.createElement('div');
+        line.className = type;
+        line.textContent = args.map(arg => 
+            typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
+        ).join(' ');
+        logDiv.appendChild(line);
+        logDiv.scrollTop = logDiv.scrollHeight;
+    }
+
+    private clearLog() {
+        const logDiv = document.getElementById('log')!;
+        logDiv.innerHTML = '';
+    }
+}
+
+// Initialize when document is ready
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', () => new TestUI());
+} else {
+    new TestUI();
+}
+
+export { TestUI };
+use std::collections::VecDeque;
+// use web_sys::Performance;
+use super::frame::Frame;
+
+#[derive(Debug, Default)]
+pub struct QueueMetrics {
+    frames_processed: usize,
+    frames_dropped: usize,
+    processing_times: Vec<f64>,
+    queue_utilization: f32,
+    last_process_time: f64,
+}
+
+pub struct Queue {
+    input_queue: VecDeque<Frame>,
+    processing_queue: VecDeque<Frame>,
+    output_queue: VecDeque<Frame>,
+    max_size: usize,
+    batch_size: usize,
+    metrics: QueueMetrics,
+}
+
+#[derive(Debug)]
+pub struct QueueStats {
+    pub frames_processed: usize,
+    pub frames_dropped: usize,
+    pub average_processing_time: f64,
+    pub queue_utilization: f32,
+    pub input_queue_size: usize,
+    pub processing_queue_size: usize,
+    pub output_queue_size: usize,
+    pub last_process_time: f64,
+    pub max_size: usize,
+    pub batch_size: usize,
+}
+
+impl Queue {
+    pub fn new(max_size: usize, batch_size: usize) -> Self {
+        Self {
+            input_queue: VecDeque::with_capacity(max_size),
+            processing_queue: VecDeque::with_capacity(batch_size),
+            output_queue: VecDeque::with_capacity(max_size),
+            max_size,
+            batch_size,
+            metrics: QueueMetrics::default(),
+        }
+    }
+
+    pub fn push(&mut self, frame: Frame) -> bool {
+        if self.input_queue.len() < self.max_size {
+            self.input_queue.push_back(frame);
+            self.update_metrics();
+            true
+        } else {
+            self.metrics.frames_dropped += 1;
+            false
+        }
+    }
+
+    pub fn process_next(&mut self) -> Option<Frame> {
+        let start_time = web_sys::window()
+            .and_then(|w| w.performance())
+            .map(|p| p.now())
+            .unwrap_or(0.0);
+
+        let result = if let Some(frame) = self.input_queue.pop_front() {
+            self.processing_queue.push_back(frame.clone());
+            self.process_frame()
+        } else {
+            None
+        };
+
+        // Record processing time
+        if let Some(window) = web_sys::window() {
+            if let Some(perf) = window.performance() {
+                let processing_time = perf.now() - start_time;
+                self.metrics.processing_times.push(processing_time);
+                self.metrics.last_process_time = processing_time;
+
+                // Keep only last 100 measurements
+                if self.metrics.processing_times.len() > 100 {
+                    self.metrics.processing_times.remove(0);
+                }
+            }
+        }
+
+        if result.is_some() {
+            self.metrics.frames_processed += 1;
+        }
+
+        self.update_metrics();
+        result
+    }
+
+    fn process_frame(&mut self) -> Option<Frame> {
+        self.processing_queue.pop_front().map(|frame| {
+            self.output_queue.push_back(frame.clone());
+            frame
+        })
+    }
+
+    pub fn process_batch(&mut self) -> Vec<Frame> {
+        let mut batch = Vec::with_capacity(self.batch_size);
+        while batch.len() < self.batch_size && !self.input_queue.is_empty() {
+            if let Some(frame) = self.process_next() {
+                batch.push(frame);
+            }
+        }
+        batch
+    }
+
+    // Metrics and Stats Methods
+    pub fn get_metrics(&self) -> QueueStats {
+        QueueStats {
+            frames_processed: self.metrics.frames_processed,
+            frames_dropped: self.metrics.frames_dropped,
+            average_processing_time: self.get_average_processing_time(),
+            queue_utilization: self.metrics.queue_utilization,
+            input_queue_size: self.input_queue.len(),
+            processing_queue_size: self.processing_queue.len(),
+            output_queue_size: self.output_queue.len(),
+            last_process_time: self.metrics.last_process_time,
+            max_size: self.max_size,
+            batch_size: self.batch_size,
+        }
+    }
+
+    // Getters for bindings.rs
+    pub fn get_size(&self) -> usize {
+        self.input_queue.len()
+    }
+
+    pub fn get_max_size(&self) -> usize {
+        self.max_size
+    }
+
+    pub fn get_batch_size(&self) -> usize {
+        self.batch_size
+    }
+
+    pub fn get_queue_sizes(&self) -> (usize, usize, usize) {
+        (
+            self.input_queue.len(),
+            self.processing_queue.len(),
+            self.output_queue.len()
+        )
+    }
+
+    pub fn get_frames_processed(&self) -> usize {
+        self.metrics.frames_processed
+    }
+
+    pub fn get_frames_dropped(&self) -> usize {
+        self.metrics.frames_dropped
+    }
+
+    pub fn get_processing_time(&self) -> f64 {
+        self.metrics.last_process_time
+    }
+
+    // Utility Methods
+    fn get_average_processing_time(&self) -> f64 {
+        if self.metrics.processing_times.is_empty() {
+            0.0
+        } else {
+            let sum: f64 = self.metrics.processing_times.iter().sum();
+            sum / self.metrics.processing_times.len() as f64
+        }
+    }
+
+    fn update_metrics(&mut self) {
+        let total_frames = self.input_queue.len() + self.processing_queue.len() + self.output_queue.len();
+        self.metrics.queue_utilization = total_frames as f32 / (self.max_size * 3) as f32;
+    }
+
+    // Queue State Methods
+    pub fn is_empty(&self) -> bool {
+        self.input_queue.is_empty() && 
+        self.processing_queue.is_empty() && 
+        self.output_queue.is_empty()
+    }
+
+    pub fn is_full(&self) -> bool {
+        self.input_queue.len() >= self.max_size
+    }
+
+    pub fn remaining_capacity(&self) -> usize {
+        self.max_size - self.input_queue.len()
+    }
+
+    pub fn clear(&mut self) {
+        self.input_queue.clear();
+        self.processing_queue.clear();
+        self.output_queue.clear();
+        self.metrics = QueueMetrics::default();
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_queue_capacity() {
+        let mut queue = Queue::new(5, 2);
+        assert_eq!(queue.remaining_capacity(), 5);
+        assert_eq!(queue.get_max_size(), 5);
+        
+        let frame = Frame::new(640, 480);
+        assert!(queue.push(frame.clone()));
+        assert_eq!(queue.get_size(), 1);
+        assert_eq!(queue.remaining_capacity(), 4);
+    }
+
+    #[test]
+    fn test_batch_processing() {
+        let mut queue = Queue::new(10, 3);
+        
+        for _ in 0..5 {
+            let frame = Frame::new(640, 480);
+            queue.push(frame);
+        }
+
+        let batch = queue.process_batch();
+        assert_eq!(batch.len(), 3);
+        
+        let stats = queue.get_metrics();
+        assert_eq!(stats.frames_processed, 3);
+        assert_eq!(queue.get_frames_processed(), 3);
+    }
+
+    #[test]
+    fn test_queue_overflow() {
+        let mut queue = Queue::new(2, 1);
+        
+        let frame1 = Frame::new(640, 480);
+        let frame2 = Frame::new(640, 480);
+        let frame3 = Frame::new(640, 480);
+        
+        assert!(queue.push(frame1));
+        assert!(queue.push(frame2));
+        assert!(!queue.push(frame3));
+        assert!(queue.is_full());
+        
+        let stats = queue.get_metrics();
+        assert_eq!(stats.frames_dropped, 1);
+        assert_eq!(queue.get_frames_dropped(), 1);
+    }
+
+    #[test]
+    fn test_queue_metrics() {
+        let mut queue = Queue::new(5, 2);
+        assert_eq!(queue.get_metrics().queue_utilization, 0.0);
+        
+        let frame = Frame::new(640, 480);
+        queue.push(frame);
+        
+        let metrics = queue.get_metrics();
+        assert!(metrics.queue_utilization > 0.0);
+        assert_eq!(metrics.frames_processed, 0);
+        assert_eq!(metrics.frames_dropped, 0);
+    }
+}
+use serde::{Serialize, Deserialize};
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Frame {
+    pub width: usize,
+    pub height: usize,
+    pub data: Vec<u8>,
+    pub timestamp: f64,
+    pub is_keyframe: bool,
+}
+
+impl Frame {
+    pub fn new(width: usize, height: usize) -> Self {
+        Self {
+            width,
+            height,
+            data: vec![0; width * height * 4],
+            timestamp: 0.0,
+            is_keyframe: false,
+        }
+    }
+
+    pub fn set_data(&mut self, data: Vec<u8>) {
+        assert_eq!(data.len(), self.width * self.height * 4);
+        self.data = data;
+    }
+}
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct Tensor {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[wasm_bindgen]
+impl Tensor {
+    #[wasm_bindgen(constructor)]
+    pub fn new(data: Vec<f32>, shape: Vec<usize>) -> Self {
+        Self { data, shape }
+    }
+
+    pub fn reshape(&mut self, new_shape: Vec<usize>) {
+        let total_size: usize = new_shape.iter().product();
+        assert_eq!(total_size, self.data.len());
+        self.shape = new_shape;
+    }
+
+    pub fn get_data(&self) -> Vec<f32> {
+        self.data.clone()
+    }
+}
+
+use wasm_bindgen::prelude::*;
+use web_sys::{WebGl2RenderingContext, WebGlProgram, WebGlShader};
+use wasm_bindgen::JsCast;
+
+pub struct WebGLDecoder {
+    context: WebGl2RenderingContext,
+    program: WebGlProgram,
+    vertex_shader: WebGlShader,
+    fragment_shader: WebGlShader,
+}
+
+impl WebGLDecoder {
+    pub fn new() -> Result<Self, JsValue> {
+        let window = web_sys::window().unwrap();
+        let document = window.document().unwrap();
+        let canvas = document
+            .create_element("canvas")?
+            .dyn_into::<web_sys::HtmlCanvasElement>()?;
+
+        let context = canvas
+            .get_context("webgl2")?
+            .unwrap()
+            .dyn_into::<WebGl2RenderingContext>()?;
+
+        // Initialize shaders and program
+        let vertex_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::VERTEX_SHADER,
+            r#"#version 300 es
+            in vec4 position;
+            void main() {
+                gl_Position = position;
+            }
+            "#,
+        )?;
+
+        let fragment_shader = compile_shader(
+            &context,
+            WebGl2RenderingContext::FRAGMENT_SHADER,
+            r#"#version 300 es
+            precision highp float;
+            out vec4 outColor;
+            void main() {
+                outColor = vec4(1.0, 0.0, 0.0, 1.0);
+            }
+            "#,
+        )?;
+
+        let program = link_program(&context, &vertex_shader, &fragment_shader)?;
+
+        Ok(Self {
+            context,
+            program,
+            vertex_shader,
+            fragment_shader,
+        })
+    }
+}
+
+fn compile_shader(
+    context: &WebGl2RenderingContext,
+    shader_type: u32,
+    source: &str,
+) -> Result<WebGlShader, String> {
+    let shader = context
+        .create_shader(shader_type)
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+    context.shader_source(&shader, source);
+    context.compile_shader(&shader);
+
+    if context
+        .get_shader_parameter(&shader, WebGl2RenderingContext::COMPILE_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(shader)
+    } else {
+        Err(context
+            .get_shader_info_log(&shader)
+            .unwrap_or_else(|| String::from("Unknown error creating shader")))
+    }
+}
+
+fn link_program(
+    context: &WebGl2RenderingContext,
+    vert_shader: &WebGlShader,
+    frag_shader: &WebGlShader,
+) -> Result<WebGlProgram, String> {
+    let program = context
+        .create_program()
+        .ok_or_else(|| String::from("Unable to create shader object"))?;
+
+    context.attach_shader(&program, vert_shader);
+    context.attach_shader(&program, frag_shader);
+    context.link_program(&program);
+
+    if context
+        .get_program_parameter(&program, WebGl2RenderingContext::LINK_STATUS)
+        .as_bool()
+        .unwrap_or(false)
+    {
+        Ok(program)
+    } else {
+        Err(context
+            .get_program_info_log(&program)
+            .unwrap_or_else(|| String::from("Unknown error creating program")))
+    }
+}
+pub mod frame;
+pub mod queue;
+pub mod tensor;
+pub mod webgl;
+
+pub use frame::Frame;
+pub use queue::Queue;
+pub use tensor::Tensor;
+pub use webgl::WebGLDecoder;
+
+use wasm_bindgen::prelude::*;
+use serde::{Serialize, Deserialize};
+use web_sys::WorkerGlobalScope;
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecoderStatus {
+    Idle = 0,
+    Initializing = 1,
+    Inited = 2,
+    Ready = 3,
+    Open = 4,
+    Pause = 5,
+    Closed = 6,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum DecodeMessage {
+    DecoderCreated = 0,
+    DecoderInit = 1,
+    DecoderInited = 2,
+    WasmLoaded = 3,
+    DecoderReady = 4,
+    DecoderOpenError = 5,
+    DecoderStart = 6,
+    DecoderStarted = 7,
+    DecoderPause = 8,
+    DecoderPaused = 9,
+    DecoderClose = 10,
+    DecoderClosed = 11,
+    DecodeVideoBuffer = 12,
+    DecodedVideoFrame = 13,
+}
+
+#[wasm_bindgen]
+pub struct DecoderWorker {
+    status: DecoderStatus,
+    decoder: IMFDecoder,
+    scope: WorkerGlobalScope,
+}
+
+#[wasm_bindgen]
+impl DecoderWorker {
+    #[wasm_bindgen(constructor)]
+    pub fn new() -> Result<DecoderWorker, JsValue> {
+        let scope = js_sys::global().unchecked_into::<WorkerGlobalScope>();
+        let decoder = IMFDecoder::new(1920, 1080)?;
+        
+        let worker = DecoderWorker {
+            status: DecoderStatus::Idle,
+            decoder,
+            scope,
+        };
+
+        worker.post_message(DecodeMessage::DecoderCreated);
+        Ok(worker)
+    }
+
+    fn post_message(&self, msg: DecodeMessage) {
+        let msg_val = serde_wasm_bindgen::to_value(&msg).unwrap();
+        self.scope.post_message(&msg_val).unwrap();
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        self.status = DecoderStatus::Initializing;
+        self.post_message(DecodeMessage::DecoderInit);
+        
+        // Initialize decoder
+        self.decoder.test();
+        
+        self.status = DecoderStatus::Inited;
+        self.post_message(DecodeMessage::DecoderInited);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Ready {
+            return Err(JsValue::from_str("Decoder not ready"));
+        }
+
+        self.status = DecoderStatus::Open;
+        self.post_message(DecodeMessage::DecoderStarted);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.status = DecoderStatus::Pause;
+        self.post_message(DecodeMessage::DecoderPaused);
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn process_frame(&mut self, frame_data: JsValue) -> Result<(), JsValue> {
+        if self.status != DecoderStatus::Open {
+            return Err(JsValue::from_str("Decoder not running"));
+        }
+
+        self.decoder.process_tokens(frame_data)?;
+        self.decoder.process_batch()?;
+        
+        self.post_message(DecodeMessage::DecodedVideoFrame);
+        Ok(())
+    }
+}
+pub struct Metrics {
+    frame_times: Vec<f64>,
+    queue_sizes: Vec<usize>,
+    processing_times: Vec<f64>,
+    window_size: usize,
+}
+
+impl Metrics {
+    pub fn new() -> Self {
+        Self {
+            frame_times: Vec::new(),
+            queue_sizes: Vec::new(),
+            processing_times: Vec::new(),
+            window_size: 60,
+        }
+    }
+
+    pub fn record_frame_time(&mut self, time: f64) {
+        self.frame_times.push(time);
+        if self.frame_times.len() > self.window_size {
+            self.frame_times.remove(0);
+        }
+    }
+
+    pub fn record_queue_size(&mut self, size: usize) {
+        self.queue_sizes.push(size);
+        if self.queue_sizes.len() > self.window_size {
+            self.queue_sizes.remove(0);
+        }
+    }
+
+    pub fn record_processing_time(&mut self, time: f64) {
+        self.processing_times.push(time);
+        if self.processing_times.len() > self.window_size {
+            self.processing_times.remove(0);
+        }
+    }
+}
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub struct Memory {
+    allocated: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl Memory {
+    pub fn new() -> Self {
+        Self {
+            allocated: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn allocate(&self, size: usize) {
+        let new_allocated = self.allocated.fetch_add(size, Ordering::SeqCst) + size;
+        let mut peak = self.peak.load(Ordering::SeqCst);
+        while new_allocated > peak {
+            match self.peak.compare_exchange(
+                peak,
+                new_allocated,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break,
+                Err(x) => peak = x,
+            }
+        }
+    }
+
+    pub fn deallocate(&self, size: usize) {
+        self.allocated.fetch_sub(size, Ordering::SeqCst);
+    }
+}
+pub mod memory;
+pub mod metrics;
+
+pub use memory::Memory;
+pub use metrics::Metrics;
+use wasm_bindgen::prelude::*;
+use web_sys::HtmlCanvasElement;
+use wasm_bindgen::JsCast;
+use serde::{Serialize, Deserialize};
+use std::sync::Arc;
+use std::rc::Rc;
+use std::cell::RefCell;
+use wgpu::*;
+use log::{info, error, debug};
+use wgpu::util::DeviceExt;
+use crate::decoder::{Frame, Queue as FrameQueue};
+
+
+
+
+
+
+
+// Remove duplicate imports and update WebGPU imports
+use wgpu::{
+    Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
+    TextureUsages, PresentMode, Features, Limits,
+    RequestAdapterOptions, PowerPreference, DeviceDescriptor
+};
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceFeature {
+    tensor: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct ReferenceData {
+    features: Vec<ReferenceFeature>,
+    token: Vec<f32>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FrameToken {
+    token: Vec<f32>,
+    frame_index: usize,
+}
+
+struct RenderContext {
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    pipeline: RenderPipeline,
+    vertex_buffer: Buffer,
+    staging_belt: wgpu::util::StagingBelt,
+    format: TextureFormat,
+    texture: Texture,
+    texture_view: TextureView,
+    bind_group: BindGroup,
+}
+
+
+impl RenderContext {
+    fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
+        let format = TextureFormat::Bgra8UnormSrgb;
+    
+        // Define vertex buffer layout with texture coordinates
+        let vertex_buffers = [VertexBufferLayout {
+            array_stride: 16, // 2 x f32 (pos) + 2 x f32 (uv)
+            step_mode: VertexStepMode::Vertex,
+            attributes: &[
+                VertexAttribute {
+                    format: VertexFormat::Float32x2,
+                    offset: 0,
+                    shader_location: 0, // position
+                },
+                VertexAttribute {
+                    format: VertexFormat::Float32x2,
+                    offset: 8,
+                    shader_location: 1, // texture coordinates
+                },
+            ],
+        }];
+    
+        // Create shader module with texture sampling
+        let shader = device.create_shader_module(ShaderModuleDescriptor {
+            label: Some("Shader"),
+            source: ShaderSource::Wgsl(r#"
+                struct VertexInput {
+                    @location(0) position: vec2<f32>,
+                    @location(1) tex_coords: vec2<f32>,
+                };
+    
+                struct VertexOutput {
+                    @builtin(position) clip_position: vec4<f32>,
+                    @location(0) tex_coords: vec2<f32>,
+                };
+    
+                @group(0) @binding(0) var t_diffuse: texture_2d<f32>;
+                @group(0) @binding(1) var s_diffuse: sampler;
+    
+                @vertex
+                fn vs_main(in: VertexInput) -> VertexOutput {
+                    var out: VertexOutput;
+                    out.tex_coords = in.tex_coords;
+                    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
+                    return out;
+                }
+    
+                @fragment
+                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+                    return textureSample(t_diffuse, s_diffuse, in.tex_coords);
+                }
+            "#.into()),
+        });
+    
+        // Create the sampler
+        let sampler = device.create_sampler(&SamplerDescriptor {
+            address_mode_u: AddressMode::ClampToEdge,
+            address_mode_v: AddressMode::ClampToEdge,
+            address_mode_w: AddressMode::ClampToEdge,
+            mag_filter: FilterMode::Linear,
+            min_filter: FilterMode::Nearest,
+            mipmap_filter: FilterMode::Nearest,
+            ..Default::default()
+        });
+    
+        // Create texture with appropriate usage
+        let texture = device.create_texture(&TextureDescriptor {
+            label: Some("Output Texture"),
+            size: Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: TextureDimension::D2,
+            format,
+            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+    
+        let texture_view = texture.create_view(&TextureViewDescriptor::default());
+    
+        // Create bind group layout
+        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
+            label: Some("Texture Bind Group Layout"),
+            entries: &[
+                BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Texture {
+                        sample_type: TextureSampleType::Float { filterable: true },
+                        view_dimension: TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: ShaderStages::FRAGMENT,
+                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+    
+        // Create the bind group
+        let bind_group = device.create_bind_group(&BindGroupDescriptor {
+            label: Some("Texture Bind Group"),
+            layout: &bind_group_layout,
+            entries: &[
+                BindGroupEntry {
+                    binding: 0,
+                    resource: BindingResource::TextureView(&texture_view),
+                },
+                BindGroupEntry {
+                    binding: 1,
+                    resource: BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+    
+        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+            label: Some("Pipeline Layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+    
+        // Create render pipeline with vertex buffer layout
+        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
+            label: Some("Render Pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                buffers: &vertex_buffers,
+            },
+            fragment: Some(FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                targets: &[Some(ColorTargetState {
+                    format,
+                    blend: Some(BlendState::REPLACE),
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            primitive: PrimitiveState {
+                topology: PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: FrontFace::Ccw,
+                cull_mode: None,
+                unclipped_depth: false,
+                polygon_mode: PolygonMode::Fill,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            multiview: None,
+        });
+    
+        // Create vertex buffer with positions and texture coordinates
+        let vertex_buffer_data = [
+            // position      // texture coordinates
+            -1.0f32, -1.0,  0.0, 1.0,   // bottom left
+            1.0, -1.0,      1.0, 1.0,   // bottom right
+            -1.0, 1.0,      0.0, 0.0,   // top left
+            1.0, 1.0,       1.0, 0.0,   // top right
+        ];
+    
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertex_buffer_data),
+            usage: BufferUsages::VERTEX,
+        });
+    
+        let staging_belt = wgpu::util::StagingBelt::new(1024);
+    
+        Self {
+            device,
+            queue,
+            pipeline,
+            vertex_buffer,
+            staging_belt,
+            format,
+            texture,
+            texture_view,
+            bind_group,
+        }
+    }
+
+    async fn create_from_canvas(canvas: HtmlCanvasElement, width: u32, height: u32) -> Result<Self, JsValue> {
+        // Create instance
+        let instance = Instance::new(InstanceDescriptor {
+            backends: Backends::all(),
+            dx12_shader_compiler: Default::default(),
+        });
+    
+        // Create surface from canvas
+        let surface = instance.create_surface_from_canvas(canvas)
+            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
+    
+        // Request adapter
+        let adapter = instance
+            .request_adapter(&RequestAdapterOptions {
+                power_preference: PowerPreference::HighPerformance,
+                force_fallback_adapter: false,
+                compatible_surface: Some(&surface),
+            })
+            .await
+            .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
+    
+        web_sys::console::log_1(&"Adapter acquired".into());
+        
+        // Request device
+        let (device, queue) = adapter
+            .request_device(
+                &DeviceDescriptor {
+                    label: None,
+                    features: Features::empty(),
+                    limits: Limits::downlevel_webgl2_defaults()
+                        .using_resolution(adapter.limits()),
+                },
+                None,
+            )
+            .await
+            .map_err(|e| JsValue::from_str(&format!("Failed to create device: {:?}", e)))?;
+
+        let device = Arc::new(device);
+        let queue = Arc::new(queue);
+        
+        // Configure surface using device and adapter capabilities
+        let surface_caps = surface.get_capabilities(&adapter);
+        let format = surface_caps
+            .formats
+            .iter()
+            .find(|f| f.is_srgb())
+            .copied()
+            .unwrap_or(surface_caps.formats[0]);
+            
+        // Configure surface
+        let config = SurfaceConfiguration {
+            usage: TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode: PresentMode::Fifo,
+            alpha_mode: surface_caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+    
+        surface.configure(&device, &config);
+        
+        // Create RenderContext using primary constructor
+        Ok(Self::new(device.clone(), queue.clone(), width, height))
+    }
+    
+    
+}
+#[wasm_bindgen]
+pub struct IMFDecoder {
+    width: u32,
+    height: u32,
+    frame_queue: FrameQueue,
+    canvas: Option<HtmlCanvasElement>,
+    render_context: Option<RenderContext>,
+    animation_id: Option<i32>,
+    reference_data: Option<ReferenceData>,
+    diagnostic_mode: bool,
+    debug_mode: bool,  // New field
+    frame_count: u64,
+    last_frame_time: f64,
+    animation_closure: Option<Closure<dyn FnMut()>>,
+}
+
+
+#[wasm_bindgen]
+impl IMFDecoder {
+
+    
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<IMFDecoder, JsValue> {
+        let _ = console_error_panic_hook::set_once();
+        let _ = wasm_logger::init(wasm_logger::Config::default());
+        
+        info!("Creating IMFDecoder with dimensions {}x{}", width, height);
+
+        Ok(Self {
+            width,
+            height,
+            frame_queue: FrameQueue::new(10000, 4),
+            canvas: None,
+            render_context: None,
+            animation_id: None,
+            reference_data: None,
+            diagnostic_mode: false,
+            debug_mode: false,  // Initialize debug mode
+            frame_count: 0,
+            last_frame_time: 0.0,
+            animation_closure: None,
+        })
+    }
+
+
+    // Add proper WASM bindings for debug mode
+    #[wasm_bindgen]
+    pub fn enable_debug_mode(&mut self) {
+        self.debug_mode = true;
+        info!("Debug mode enabled");
+    }
+
+    #[wasm_bindgen]
+    pub fn disable_debug_mode(&mut self) {
+        self.debug_mode = false;
+        info!("Debug mode disabled");
+    }
+
+    #[wasm_bindgen]
+    pub fn is_debug_mode(&self) -> bool {
+        self.debug_mode
+    }
+
+    #[wasm_bindgen]
+    pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
+        self.canvas = Some(canvas.clone());
+        
+        match RenderContext::create_from_canvas(canvas, self.width, self.height).await {
+            Ok(context) => {
+                self.render_context = Some(context);
+                Ok("WebGPU context initialized successfully".to_string())
+            },
+            Err(e) => Err(JsValue::from_str(&format!("Failed to initialize WebGPU context: {:?}", e)))
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn get_capabilities(&self) -> JsValue {
+        let capabilities = js_sys::Object::new();
+        
+        js_sys::Reflect::set(
+            &capabilities,
+            &"version".into(),
+            &"1.0.0".into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"dimensions".into(),
+            &format!("{}x{}", self.width, self.height).into()
+        ).unwrap();
+
+        // Create features array
+        let features = js_sys::Array::new();
+        features.push(&"WebGPU".into());
+        features.push(&"Tensor Processing".into());
+        features.push(&"Frame Queue".into());
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"features".into(),
+            &features
+        ).unwrap();
+
+        // Create methods array
+        let methods = js_sys::Array::new();
+        methods.push(&"test".into());
+        methods.push(&"start_player_loop".into());
+        methods.push(&"stop_player_loop".into());
+        methods.push(&"set_reference_data".into());
+        methods.push(&"process_tokens".into());
+        methods.push(&"process_batch".into());
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"methods".into(),
+            &methods
+        ).unwrap();
+
+        // Add performance capabilities
+        let performance = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &performance,
+            &"maxQueueSize".into(),
+            &(60_i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &performance,
+            &"batchSize".into(),
+            &(4_i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &performance,
+            &"targetFPS".into(),
+            &(60_i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"performance".into(),
+            &performance
+        ).unwrap();
+
+        // Add diagnostic info
+        let diagnostics = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &diagnostics,
+            &"frameCounter".into(),
+            &(self.frame_count as i32).into()
+        ).unwrap();
+        js_sys::Reflect::set(
+            &diagnostics,
+            &"diagnosticMode".into(),
+            &self.diagnostic_mode.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &capabilities,
+            &"diagnostics".into(),
+            &diagnostics
+        ).unwrap();
+
+        capabilities.into()
+    }
+
+    #[wasm_bindgen]
+    pub fn test(&self) -> String {
+        let msg = format!("IMFDecoder working! Size: {}x{}", self.width, self.height);
+        info!("{}", msg);
+        msg
+    }
+
+    #[wasm_bindgen]
+    pub fn get_status(&self) -> JsValue {
+        let status = js_sys::Object::new();
+
+        // Basic status
+        js_sys::Reflect::set(
+            &status,
+            &"initialized".into(),
+            &self.render_context.is_some().into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &status,
+            &"running".into(),
+            &self.animation_id.is_some().into()
+        ).unwrap();
+
+        // Performance metrics
+        let metrics = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &metrics,
+            &"frameCount".into(),
+            &(self.frame_count as i32).into()
+        ).unwrap();
+        
+        if let Some(window) = web_sys::window() {
+            if let Some(perf) = window.performance() {
+                js_sys::Reflect::set(
+                    &metrics,
+                    &"lastFrameTime".into(),
+                    &self.last_frame_time.into()
+                ).unwrap();
+            }
+        }
+
+        js_sys::Reflect::set(&status, &"metrics".into(), &metrics).unwrap();
+
+        // Queue status using correct method names
+        let queue_status = js_sys::Object::new();
+        let (input_size, processing_size, output_size) = self.frame_queue.get_queue_sizes();
+        
+        js_sys::Reflect::set(
+            &queue_status,
+            &"inputQueueSize".into(),
+            &(input_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"processingQueueSize".into(),
+            &(processing_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"outputQueueSize".into(),
+            &(output_size as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"maxSize".into(),
+            &(self.frame_queue.get_max_size() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"batchSize".into(),
+            &(self.frame_queue.get_batch_size() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"isFull".into(),
+            &self.frame_queue.is_full().into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"isEmpty".into(),
+            &self.frame_queue.is_empty().into()
+        ).unwrap();
+
+        // Add additional metrics
+        js_sys::Reflect::set(
+            &queue_status,
+            &"framesProcessed".into(),
+            &(self.frame_queue.get_frames_processed() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"framesDropped".into(),
+            &(self.frame_queue.get_frames_dropped() as i32).into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"processingTime".into(),
+            &self.frame_queue.get_processing_time().into()
+        ).unwrap();
+
+        // Add queue stats
+        let stats = self.frame_queue.get_metrics();
+        let queue_metrics = js_sys::Object::new();
+        
+        js_sys::Reflect::set(
+            &queue_metrics,
+            &"averageProcessingTime".into(),
+            &stats.average_processing_time.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_metrics,
+            &"queueUtilization".into(),
+            &stats.queue_utilization.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &queue_status,
+            &"metrics".into(),
+            &queue_metrics
+        ).unwrap();
+
+        js_sys::Reflect::set(&status, &"queue".into(), &queue_status).unwrap();
+
+        // Debug info
+        let debug = js_sys::Object::new();
+        js_sys::Reflect::set(
+            &debug,
+            &"diagnosticMode".into(),
+            &self.diagnostic_mode.into()
+        ).unwrap();
+
+        js_sys::Reflect::set(&status, &"debug".into(), &debug).unwrap();
+
+        status.into()
+    }
+
+    #[wasm_bindgen]
+    pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
+        let decoder_ptr = self as *mut IMFDecoder;
+        let callback_fn = Box::new(move || {
+            let decoder = unsafe { &mut *decoder_ptr };
+            
+            debug!("Animation frame callback start");
+            if let Err(e) = decoder.render_frame() {
+                error!("Render error: {:?}", e);
+                return;
+            }
+            
+            // Request next frame if window exists
+            if let Some(window) = web_sys::window() {
+                if let Some(closure) = &decoder.animation_closure {
+                    if let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) {
+                        debug!("Scheduled next frame with id: {}", id);
+                        decoder.animation_id = Some(id);
+                    }
+                }
+            }
+            
+            decoder.frame_count += 1;
+            debug!("Animation frame callback complete");
+        });
+
+        // Create the animation closure
+        let closure = Closure::wrap(callback_fn as Box<dyn FnMut()>);
+
+        // Start the animation loop
+        let window = web_sys::window()
+            .ok_or_else(|| JsValue::from_str("No window found"))?;
+
+        let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
+        debug!("Initial animation frame scheduled with id: {}", id);
+        
+        self.animation_id = Some(id);
+        self.animation_closure = Some(closure);
+
+        Ok(())
+    }
+    #[wasm_bindgen]
+    pub fn stop_player_loop(&mut self) {
+        debug!("Stopping player loop");
+        
+        // Cancel animation frame
+        if let Some(id) = self.animation_id.take() {
+            if let Some(window) = web_sys::window() {
+                debug!("Canceling animation frame {}", id);
+                let _ = window.cancel_animation_frame(id);
+            }
+        }
+
+        // Drop the closure
+        if self.animation_closure.take().is_some() {
+            debug!("Animation closure dropped");
+        }
+        
+        info!("Player loop stopped");
+    }
+
+
+    #[wasm_bindgen(getter)]
+    pub fn diagnostic_mode(&self) -> bool {
+        self.diagnostic_mode
+    }
+
+    #[wasm_bindgen(setter)]
+    pub fn set_diagnostic_mode(&mut self, value: bool) {
+        self.diagnostic_mode = value;
+        info!("Diagnostic mode set to: {}", value);
+    }
+
+    #[wasm_bindgen]
+    pub fn set_reference_data(&mut self, data: JsValue) -> Result<String, JsValue> {
+        info!("Setting reference data...");
+        
+        let ref_data: ReferenceData = serde_wasm_bindgen::from_value(data)?;
+        
+        let expected_shapes = vec![
+            vec![1, 128, 64, 64],
+            vec![1, 256, 32, 32],
+            vec![1, 512, 16, 16],
+            vec![1, 512, 8, 8],
+        ];
+
+        for (feature, expected) in ref_data.features.iter().zip(expected_shapes.iter()) {
+            if feature.shape != *expected {
+                return Err(JsValue::from_str(&format!(
+                    "Invalid tensor shape: {:?}, expected: {:?}", 
+                    feature.shape, expected
+                )));
+            }
+        }
+
+        if ref_data.token.len() != 32 {
+            return Err(JsValue::from_str("Reference token must be length 32"));
+        }
+
+        self.reference_data = Some(ref_data);
+        Ok("Reference data set successfully".to_string())
+    }
+
+  
+    #[wasm_bindgen]
+    pub fn process_tokens(&mut self, tokens: JsValue) -> Result<String, JsValue> {
+        info!("Starting token processing...");
+        
+        let frame_tokens: Vec<FrameToken> = match serde_wasm_bindgen::from_value::<Vec<FrameToken>>(tokens) {
+            Ok(t) => {
+                info!("Successfully deserialized {} tokens", t.len());
+                t
+            },
+            Err(e) => {
+                error!("Failed to deserialize tokens: {:?}", e);
+                return Err(JsValue::from_str(&format!("Token deserialization failed: {:?}", e)));
+            }
+        };
+        
+        let token_count = frame_tokens.len();
+        info!("Processing {} tokens", token_count);
+        
+        for (idx, token) in frame_tokens.iter().enumerate() {
+            info!("Processing token {}/{} with frame index {}", idx + 1, token_count, token.frame_index);
+            debug!("Token data length: {}", token.token.len());
+            
+            let mut frame = Frame::new(self.width as usize, self.height as usize);
+            let frame_data: Vec<u8> = token.token.iter().map(|&x| x as u8).collect();
+            debug!("Converted frame data length: {}", frame_data.len());
+            
+            frame.set_data(frame_data);
+            debug!("Frame data set, pushing to queue");
+            
+            self.frame_queue.push(frame);
+        }
+        
+        info!("Token processing complete");
+        Ok(format!("Successfully processed {} tokens", token_count))
+    }
+
+    fn generate_debug_pattern(&self, frame_data: &mut [u8]) {
+        let time = (self.frame_count as f32) * 0.05;
+        
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = ((y * self.width + x) * 4) as usize;
+                
+                // Create animated color pattern
+                let r = ((((x as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                let g = ((((y as f32) * 0.01 + time).cos() + 1.0) * 127.5) as u8;
+                let b = (((((x + y) as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                
+                frame_data[idx] = r;     // R
+                frame_data[idx + 1] = g; // G
+                frame_data[idx + 2] = b; // B
+                frame_data[idx + 3] = 255; // A
+            }
+        }
+    }
+
+
+     fn render_frame(&mut self) -> Result<(), JsValue> {
+        debug!("Starting render frame");
+        
+        let context = self.render_context.as_ref()
+            .ok_or_else(|| {
+                error!("Render context not initialized");
+                JsValue::from_str("Render context not initialized")
+            })?;
+
+        if self.debug_mode {
+            // Generate debug pattern
+            let mut frame_data = vec![0u8; (self.width * self.height * 4) as usize];
+            self.generate_debug_pattern(&mut frame_data);
+
+            // Write debug pattern directly to texture
+            context.queue.write_texture(
+                ImageCopyTexture {
+                    texture: &context.texture,
+                    mip_level: 0,
+                    origin: Origin3d::ZERO,
+                    aspect: TextureAspect::All,
+                },
+                &frame_data,
+                ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(self.width * 4),
+                    rows_per_image: Some(self.height),
+                },
+                Extent3d {
+                    width: self.width,
+                    height: self.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        } else {
+            // Original frame queue processing
+            if let Some(frame) = self.frame_queue.process_next() {
+                context.queue.write_texture(
+                    ImageCopyTexture {
+                        texture: &context.texture,
+                        mip_level: 0,
+                        origin: Origin3d::ZERO,
+                        aspect: TextureAspect::All,
+                    },
+                    &frame.data,
+                    ImageDataLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.width * 4),
+                        rows_per_image: Some(self.height),
+                    },
+                    Extent3d {
+                        width: self.width,
+                        height: self.height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+            }
+        }
+
+        let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
+            label: Some("Render Encoder"),
+        });
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("Main Render Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &context.texture_view,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Load,  // Changed to Load since we're using the texture directly
+                        store: true,
+                    },
+                })],
+                depth_stencil_attachment: None,
+            });
+
+            render_pass.set_pipeline(&context.pipeline);
+            render_pass.set_bind_group(0, &context.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
+        }
+
+        context.queue.submit(std::iter::once(encoder.finish()));
+
+        if self.diagnostic_mode {
+            self.update_metrics();
+        }
+
+        Ok(())
+    }
+
+
+    fn update_metrics(&mut self) {
+        if let Some(window) = web_sys::window() {
+            if let Some(_performance) = window.performance() {
+                let now = _performance.now();
+                let frame_time = now - self.last_frame_time;
+                self.last_frame_time = now;
+
+                let fps = 1000.0 / frame_time;
+                info!("Frame {} metrics:", self.frame_count);
+                debug!("  - Frame time: {:.2}ms", frame_time);
+                debug!("  - FPS: {:.2}", fps);
+                debug!("  - Queue status: {:?}", self.frame_queue.get_queue_sizes());
+                
+                if self.frame_count % 60 == 0 {
+                    info!("Performance report:");
+                    info!("  - Average FPS: {:.2}", fps);
+                    info!("  - Frame time: {:.2}ms", frame_time);
+                    info!("  - Frames processed: {}", self.frame_count);
+                }
+            }
+        }
+    }
+
+    #[wasm_bindgen]
+    pub fn process_batch(&mut self) -> Result<String, JsValue> {
+        info!("Processing batch...");
+        let processed = self.frame_queue.process_batch();
+        Ok(format!("Processed batch: {} frames", processed.len()))
+    }
+
+    #[wasm_bindgen]
+    pub fn get_reference_status(&self) -> String {
+        match &self.reference_data {
+            Some(ref_data) => format!(
+                "Reference data loaded: {} features",
+                ref_data.features.len()
+            ),
+            None => "No reference data loaded".to_string(),
+        }
+    }
+}
+
+impl Drop for IMFDecoder {
+    fn drop(&mut self) {
+        self.stop_player_loop();
+    }
+}
+
+// Helper struct for passing tensor data between Rust and JavaScript
+#[derive(Serialize, Deserialize)]
+struct TensorData {
+    data: Vec<f32>,
+    shape: Vec<usize>,
+}
+
+// JavaScript bindings for IMF operations
+#[wasm_bindgen]
+extern "C" {
+    // Define JavaScript functions that will be called from Rust
+    #[wasm_bindgen(js_namespace = tf, js_name = tensor)]
+    fn create_tensor(data: &[f32], shape: &[usize]) -> JsValue;
+
+    #[wasm_bindgen(js_namespace = tf, js_name = tidy)]
+    fn tensor_tidy(callback: &Closure<dyn FnMut() -> JsValue>) -> JsValue;
+}
+pub mod bindings;
+
+// Re-export the bindings
+pub use bindings::*;
+use wasm_bindgen::prelude::*;
+use web_sys::{Worker, MessageEvent};
+
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq)]
+pub enum PlayerStatus {
+    Idle = 0,
+    Ready = 1,
+    Playing = 2,
+    Pause = 3,
+    Destroyed = 4,
+}
+
+#[wasm_bindgen]
+pub struct Player {
+    status: PlayerStatus,
+    worker: Option<Worker>,
+    width: u32,
+    height: u32,
+}
+
+#[wasm_bindgen]
+impl Player {
+    #[wasm_bindgen(constructor)]
+    pub fn new(width: u32, height: u32) -> Result<Player, JsValue> {
+        let worker = Worker::new("./decoder.worker.js")?;
+        
+        let player = Player {
+            status: PlayerStatus::Idle,
+            worker: Some(worker),
+            width,
+            height,
+        };
+
+        Ok(player)
+    }
+
+    #[wasm_bindgen]
+    pub fn initialize(&mut self) -> Result<(), JsValue> {
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("initialize");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Ready;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn start(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Ready {
+            return Err(JsValue::from_str("Player not ready"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("start");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Playing;
+        }
+        Ok(())
+    }
+
+    #[wasm_bindgen]
+    pub fn pause(&mut self) -> Result<(), JsValue> {
+        if self.status != PlayerStatus::Playing {
+            return Err(JsValue::from_str("Player not playing"));
+        }
+
+        if let Some(worker) = &self.worker {
+            let msg = JsValue::from_str("pause");
+            worker.post_message(&msg)?;
+            self.status = PlayerStatus::Pause;
+        }
+        Ok(())
+    }
+}
+use wasm_bindgen::prelude::*;
+
+pub mod decoder;
+pub mod utils;
+pub mod wasm;
+
+// Re-export for JavaScript
+pub use wasm::bindings::*;
+
+// Initialize panic hook
+#[wasm_bindgen(start)]
+pub fn start() {
+    std::panic::set_hook(Box::new(console_error_panic_hook::hook));
+}
