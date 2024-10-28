@@ -46,7 +46,7 @@ module.exports = {
     },
     plugins: [
         new HtmlWebpackPlugin({
-            template: './www/index.html',
+            template: './index.html',  // Updated path
             filename: 'index.html',
         }),
         new WasmPackPlugin({
@@ -56,16 +56,10 @@ module.exports = {
         }),
         new CopyWebpackPlugin({
             patterns: [
-                { 
-                    from: 'www',
-                    to: '.',
-                    globOptions: {
-                        ignore: ['**/*.html']
-                    }
-                },
                 {
-                    from: 'styles',
-                    to: 'styles'
+                    from: 'styles',  // Just the styles directory
+                    to: 'styles',
+                    noErrorOnMissing: true
                 }
             ]
         })
@@ -83,17 +77,10 @@ module.exports = {
         },
         hot: true,
         compress: true,
-        port: 'auto',  // Let webpack find an available port
+        port: 'auto',
         historyApiFallback: true,
         headers: {
             'Access-Control-Allow-Origin': '*'
-        },
-        onListening: function (devServer) {
-            if (!devServer) {
-                throw new Error('webpack-dev-server is not defined');
-            }
-            const port = devServer.server.address().port;
-            console.log('Listening on port:', port);
         }
     }
-}
+};
