@@ -392,9 +392,29 @@ class TestUI {
             this.log('info', `Render context initialized: ${initResult}`);
     
 
-            const result = await this.decoder.load_frames("/frames/_0tf2n3rlJU_0/");
-            console.log("Frames loaded:", result);
+ // Start playback (will automatically alternate directions)
+ await  this.decoder.start_player_loop();
 
+ // Monitor status including playback direction
+ setInterval(() => {
+     const status =  this.decoder.get_status();
+     if (status.playback) {
+         console.log(
+             `Playing ${status.playback.direction > 0 ? 'forward' : 'backward'}, ` +
+             `Frame: ${status.playback.currentFrame}`
+         );
+     }
+ }, 1000);
+
+ // Example controls
+ document.getElementById('forward')?.addEventListener('click', () => {
+     this.decoder.play_forward();
+ });
+
+ document.getElementById('backward')?.addEventListener('click', () => {
+    this.decoder.play_backward();
+ });
+            
             this.buttons.start.disabled = false;
             this.updateStatus('decoder', DecoderStatus.Ready);
             this.log('success', 'Decoder initialized successfully in debug mode');

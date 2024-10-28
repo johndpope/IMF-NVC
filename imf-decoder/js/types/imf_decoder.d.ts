@@ -62,6 +62,11 @@ declare module '@pkg/imf_decoder' {
         process_tokens(tokens: FrameToken[]): Promise<string>;
         process_batch(): Promise<string>;
         get_reference_status(): string;
+
+        // Playback control methods
+        play_forward(): void;
+        play_backward(): void;
+        get_playback_direction(): number;
     }
 
     export function initSync(): void;

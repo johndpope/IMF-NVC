@@ -36,7 +36,7 @@ pub struct IMFDecoder {
     current_frame: RefCell<usize>,     // Track current frame index
     target_fps: u32,           // Added: Target frame rate
     frame_interval: f64,       // Added: Target time between frames
-
+    playback_direction: RefCell<i32>, // 1 for forward, -1 for backward
 
 }
 
@@ -103,7 +103,7 @@ impl IMFDecoder {
             current_frame: RefCell::new(0),
             target_fps,
             frame_interval,
-        
+            playback_direction: RefCell::new(1), // Start playing forward
         })
     }
 
@@ -690,10 +690,33 @@ impl IMFDecoder {
             } else {
                 let frames = self.frames.borrow();
                 let current_frame = *self.current_frame.borrow();
+                let direction = *self.playback_direction.borrow();
                 
                 if let Some(frame) = frames.get(current_frame) {
                     context.draw_image_with_image_bitmap(frame, 0.0, 0.0)?;
-                    *self.current_frame.borrow_mut() = (current_frame + 1) % frames.len();
+                    
+                    let next_frame = if direction > 0 {
+                        // Playing forward
+                        let next = current_frame + 1;
+                        if next >= frames.len() {
+                            // Reached end, reverse direction
+                            *self.playback_direction.borrow_mut() = -1;
+                            frames.len() - 2 // Start going backward from second-to-last frame
+                        } else {
+                            next
+                        }
+                    } else {
+                        // Playing backward
+                        if current_frame == 0 {
+                            // Reached start, reverse direction
+                            *self.playback_direction.borrow_mut() = 1;
+                            1 // Start going forward from second frame
+                        } else {
+                            current_frame - 1
+                        }
+                    };
+                    
+                    *self.current_frame.borrow_mut() = next_frame;
                 }
             }
 
@@ -701,7 +724,21 @@ impl IMFDecoder {
         }
         Ok(())
     }
+    // Add methods to control playback direction
+    #[wasm_bindgen]
+    pub fn play_forward(&self) {
+        *self.playback_direction.borrow_mut() = 1;
+    }
 
+    #[wasm_bindgen]
+    pub fn play_backward(&self) {
+        *self.playback_direction.borrow_mut() = -1;
+    }
+
+    #[wasm_bindgen]
+    pub fn get_playback_direction(&self) -> i32 {
+        *self.playback_direction.borrow()
+    }
 
     
     fn update_metrics(&self) {
