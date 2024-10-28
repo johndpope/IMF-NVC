@@ -402,8 +402,9 @@ class TestUI {
 
     private async processFrame() {
         if (!this.decoder) return;
-
+    
         try {
+            // Create frame data
             const frameWidth = 640;
             const frameHeight = 480;
             const channelCount = 4; // RGBA
@@ -413,14 +414,16 @@ class TestUI {
                 token: frameData,
                 frame_index: this.frameCount++
             };
-
-            this.log('info', `Processing frame ${token.frame_index}`);
-            const processResult = await this.decoder.process_tokens([token]);
-            this.log('info', processResult);
-            
-            const batchResult = await this.decoder.process_batch();
-            this.log('success', `Batch processed: ${batchResult}`);
-
+    
+            // Process frame
+            await this.decoder.process_tokens([token]);
+            await this.decoder.process_batch();
+    
+            // Update metrics if needed
+            if (this.frameCount % 60 === 0) {
+                const status = await this.decoder.get_status();
+                this.log('info', `Frame ${this.frameCount}: ${JSON.stringify(status)}`);
+            }
         } catch (error) {
             const errorMessage = error instanceof Error ? error.message : String(error);
             this.log('error', `Process error: ${errorMessage}`);
@@ -431,10 +434,10 @@ class TestUI {
         if (!this.decoder || !this.canvas) return;
 
         try {
-            // Verify render context is initialized
+            // Verify we have a canvas
             const status = await this.decoder.get_status();
             if (!status.initialized) {
-                throw new Error('Render context not initialized');
+                throw new Error('Canvas not initialized');
             }
 
             await this.decoder.start_player_loop();
@@ -459,10 +462,10 @@ class TestUI {
                 throw new Error('Decoder not initialized');
             }
     
-            // Make sure render context is ready before starting the loop
+            // Only check for canvas
             const status = await this.decoder.get_status();
             if (!status.initialized) {
-                throw new Error('Render context not initialized');
+                throw new Error('Canvas not initialized');
             }
     
             // Start the decoder's internal render loop
@@ -476,7 +479,7 @@ class TestUI {
             this.startDecoderLoop();
             
             this.log('success', 'Decoder started');
-        } catch (error:any) {
+        } catch (error) {
             this.log('error', `Start error: ${error.message}`);
             this.updateStatus('decoder', DecoderStatus.Ready);
         }

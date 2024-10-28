@@ -22,12 +22,20 @@ futures = "0.3"
 [dependencies.web-sys]
 version = "0.3.64"
 features = [
+  "CanvasRenderingContext2d",
+    "ImageData",
+    "ImageBitmap",
+    "HtmlCanvasElement",
+    "Window",
     "Document",
     "Element",
-    "HtmlCanvasElement",
-    "WebGl2RenderingContext",
-    "Window",
     "Performance",
-    "Navigator",
-    "console"
+    "console",
+    "Gpu",
+    "GpuAdapter",
+    "GpuDevice",
+    "GpuQueue",
+    "GpuBuffer",
+    "GpuTexture",
+    "WebGl2RenderingContext",
 ]

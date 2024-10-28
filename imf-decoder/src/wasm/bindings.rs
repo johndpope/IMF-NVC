@@ -1,27 +1,48 @@
 use wasm_bindgen::prelude::*;
-use web_sys::HtmlCanvasElement;
+use web_sys::{HtmlCanvasElement, CanvasRenderingContext2d, ImageData};
 use wasm_bindgen::JsCast;
 use serde::{Serialize, Deserialize};
-use std::sync::Arc;
-use std::rc::Rc;
-use std::cell::RefCell;
-use wgpu::*;
 use log::{info, error, debug};
-use wgpu::util::DeviceExt;
+use wasm_bindgen::Clamped;
 use crate::decoder::{Frame, Queue as FrameQueue};
+use std::cell::RefCell;
+use std::rc::Rc;
+use web_sys::window;
+use wasm_bindgen::JsValue;
 
 
+// Add this type alias to make the closure type more readable
+type AnimationCallback = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
 
+#[wasm_bindgen]
+pub struct IMFDecoder {
+    width: u32,
+    height: u32,
+    frame_queue: FrameQueue,
+    canvas: Option<HtmlCanvasElement>,
+    context: Option<CanvasRenderingContext2d>,
+    animation_id: Option<i32>,
+    reference_data: Option<ReferenceData>,
+    diagnostic_mode: bool,
+    debug_mode: bool,
+    frame_count: RefCell<u64>,
+    last_frame_time: RefCell<f64>,
+    animation_callback: AnimationCallback,
 
+}
 
+struct AnimationFrame {
+    closure: Closure<dyn FnMut()>,
+    id: i32,
+}
+impl Drop for AnimationFrame {
+    fn drop(&mut self) {
+        if let Some(window) = web_sys::window() {
+            let _ = window.cancel_animation_frame(self.id);
+        }
+    }
+}
 
-
-// Remove duplicate imports and update WebGPU imports
-use wgpu::{
-    Instance, InstanceDescriptor, Backends, SurfaceConfiguration,
-    TextureUsages, PresentMode, Features, Limits,
-    RequestAdapterOptions, PowerPreference, DeviceDescriptor
-};
 
 #[derive(Serialize, Deserialize, Debug)]
 struct ReferenceFeature {
@@ -41,294 +62,6 @@ struct FrameToken {
     frame_index: usize,
 }
 
-struct RenderContext {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
-    pipeline: RenderPipeline,
-    vertex_buffer: Buffer,
-    staging_belt: wgpu::util::StagingBelt,
-    format: TextureFormat,
-    texture: Texture,
-    texture_view: TextureView,
-    bind_group: BindGroup,
-}
-
-
-impl RenderContext {
-    fn new(device: Arc<Device>, queue: Arc<Queue>, width: u32, height: u32) -> Self {
-        let format = TextureFormat::Bgra8UnormSrgb;
-    
-        // Define vertex buffer layout with texture coordinates
-        let vertex_buffers = [VertexBufferLayout {
-            array_stride: 16, // 2 x f32 (pos) + 2 x f32 (uv)
-            step_mode: VertexStepMode::Vertex,
-            attributes: &[
-                VertexAttribute {
-                    format: VertexFormat::Float32x2,
-                    offset: 0,
-                    shader_location: 0, // position
-                },
-                VertexAttribute {
-                    format: VertexFormat::Float32x2,
-                    offset: 8,
-                    shader_location: 1, // texture coordinates
-                },
-            ],
-        }];
-    
-        // Create shader module with texture sampling
-        let shader = device.create_shader_module(ShaderModuleDescriptor {
-            label: Some("Shader"),
-            source: ShaderSource::Wgsl(r#"
-                struct VertexInput {
-                    @location(0) position: vec2<f32>,
-                    @location(1) tex_coords: vec2<f32>,
-                };
-    
-                struct VertexOutput {
-                    @builtin(position) clip_position: vec4<f32>,
-                    @location(0) tex_coords: vec2<f32>,
-                };
-    
-                @group(0) @binding(0) var t_diffuse: texture_2d<f32>;
-                @group(0) @binding(1) var s_diffuse: sampler;
-    
-                @vertex
-                fn vs_main(in: VertexInput) -> VertexOutput {
-                    var out: VertexOutput;
-                    out.tex_coords = in.tex_coords;
-                    out.clip_position = vec4<f32>(in.position, 0.0, 1.0);
-                    return out;
-                }
-    
-                @fragment
-                fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-                    return textureSample(t_diffuse, s_diffuse, in.tex_coords);
-                }
-            "#.into()),
-        });
-    
-        // Create the sampler
-        let sampler = device.create_sampler(&SamplerDescriptor {
-            address_mode_u: AddressMode::ClampToEdge,
-            address_mode_v: AddressMode::ClampToEdge,
-            address_mode_w: AddressMode::ClampToEdge,
-            mag_filter: FilterMode::Linear,
-            min_filter: FilterMode::Nearest,
-            mipmap_filter: FilterMode::Nearest,
-            ..Default::default()
-        });
-    
-        // Create texture with appropriate usage
-        let texture = device.create_texture(&TextureDescriptor {
-            label: Some("Output Texture"),
-            size: Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format,
-            usage: TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST | TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
-    
-        let texture_view = texture.create_view(&TextureViewDescriptor::default());
-    
-        // Create bind group layout
-        let bind_group_layout = device.create_bind_group_layout(&BindGroupLayoutDescriptor {
-            label: Some("Texture Bind Group Layout"),
-            entries: &[
-                BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Texture {
-                        sample_type: TextureSampleType::Float { filterable: true },
-                        view_dimension: TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: ShaderStages::FRAGMENT,
-                    ty: BindingType::Sampler(SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-    
-        // Create the bind group
-        let bind_group = device.create_bind_group(&BindGroupDescriptor {
-            label: Some("Texture Bind Group"),
-            layout: &bind_group_layout,
-            entries: &[
-                BindGroupEntry {
-                    binding: 0,
-                    resource: BindingResource::TextureView(&texture_view),
-                },
-                BindGroupEntry {
-                    binding: 1,
-                    resource: BindingResource::Sampler(&sampler),
-                },
-            ],
-        });
-    
-        let pipeline_layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
-            label: Some("Pipeline Layout"),
-            bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
-        });
-    
-        // Create render pipeline with vertex buffer layout
-        let pipeline = device.create_render_pipeline(&RenderPipelineDescriptor {
-            label: Some("Render Pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: VertexState {
-                module: &shader,
-                entry_point: "vs_main",
-                buffers: &vertex_buffers,
-            },
-            fragment: Some(FragmentState {
-                module: &shader,
-                entry_point: "fs_main",
-                targets: &[Some(ColorTargetState {
-                    format,
-                    blend: Some(BlendState::REPLACE),
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            primitive: PrimitiveState {
-                topology: PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: FrontFace::Ccw,
-                cull_mode: None,
-                unclipped_depth: false,
-                polygon_mode: PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            multiview: None,
-        });
-    
-        // Create vertex buffer with positions and texture coordinates
-        let vertex_buffer_data = [
-            // position      // texture coordinates
-            -1.0f32, -1.0,  0.0, 1.0,   // bottom left
-            1.0, -1.0,      1.0, 1.0,   // bottom right
-            -1.0, 1.0,      0.0, 0.0,   // top left
-            1.0, 1.0,       1.0, 0.0,   // top right
-        ];
-    
-        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("Vertex Buffer"),
-            contents: bytemuck::cast_slice(&vertex_buffer_data),
-            usage: BufferUsages::VERTEX,
-        });
-    
-        let staging_belt = wgpu::util::StagingBelt::new(1024);
-    
-        Self {
-            device,
-            queue,
-            pipeline,
-            vertex_buffer,
-            staging_belt,
-            format,
-            texture,
-            texture_view,
-            bind_group,
-        }
-    }
-
-    async fn create_from_canvas(canvas: HtmlCanvasElement, width: u32, height: u32) -> Result<Self, JsValue> {
-        // Create instance
-        let instance = Instance::new(InstanceDescriptor {
-            backends: Backends::all(),
-            dx12_shader_compiler: Default::default(),
-        });
-    
-        // Create surface from canvas
-        let surface = instance.create_surface_from_canvas(canvas)
-            .map_err(|e| JsValue::from_str(&format!("Failed to create surface: {:?}", e)))?;
-    
-        // Request adapter
-        let adapter = instance
-            .request_adapter(&RequestAdapterOptions {
-                power_preference: PowerPreference::HighPerformance,
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .ok_or_else(|| JsValue::from_str("Failed to get WebGPU adapter"))?;
-    
-        web_sys::console::log_1(&"Adapter acquired".into());
-        
-        // Request device
-        let (device, queue) = adapter
-            .request_device(
-                &DeviceDescriptor {
-                    label: None,
-                    features: Features::empty(),
-                    limits: Limits::downlevel_webgl2_defaults()
-                        .using_resolution(adapter.limits()),
-                },
-                None,
-            )
-            .await
-            .map_err(|e| JsValue::from_str(&format!("Failed to create device: {:?}", e)))?;
-
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-        
-        // Configure surface using device and adapter capabilities
-        let surface_caps = surface.get_capabilities(&adapter);
-        let format = surface_caps
-            .formats
-            .iter()
-            .find(|f| f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
-            
-        // Configure surface
-        let config = SurfaceConfiguration {
-            usage: TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width,
-            height,
-            present_mode: PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
-            view_formats: vec![],
-        };
-    
-        surface.configure(&device, &config);
-        
-        // Create RenderContext using primary constructor
-        Ok(Self::new(device.clone(), queue.clone(), width, height))
-    }
-    
-    
-}
-#[wasm_bindgen]
-pub struct IMFDecoder {
-    width: u32,
-    height: u32,
-    frame_queue: FrameQueue,
-    canvas: Option<HtmlCanvasElement>,
-    render_context: Option<RenderContext>,
-    animation_id: Option<i32>,
-    reference_data: Option<ReferenceData>,
-    diagnostic_mode: bool,
-    debug_mode: bool,  // New field
-    frame_count: u64,
-    last_frame_time: f64,
-    animation_closure: Option<Closure<dyn FnMut()>>,
-}
-
-
 #[wasm_bindgen]
 impl IMFDecoder {
 
@@ -345,16 +78,17 @@ impl IMFDecoder {
             height,
             frame_queue: FrameQueue::new(10000, 4),
             canvas: None,
-            render_context: None,
+            context: None,
             animation_id: None,
             reference_data: None,
             diagnostic_mode: false,
-            debug_mode: false,  // Initialize debug mode
-            frame_count: 0,
-            last_frame_time: 0.0,
-            animation_closure: None,
+            debug_mode: false,
+            frame_count: RefCell::new(0),
+            last_frame_time: RefCell::new(0.0),
+            animation_callback: Rc::new(RefCell::new(None)),
         })
     }
+
     #[wasm_bindgen(getter)]
     pub fn debug_mode(&self) -> bool {
         self.debug_mode
@@ -383,20 +117,129 @@ impl IMFDecoder {
         self.debug_mode = false;
         info!("Debug mode disabled");
     }
+ 
+    // pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
+    //     debug!("Starting player loop");
+        
+    //     self.stop_player_loop();
 
+    //     let window = web_sys::window()
+    //         .ok_or_else(|| JsValue::from_str("No window found"))?;
+    //     let window = Rc::new(window);
+    //     let window_clone = window.clone();
+
+    //     let this = Rc::new(RefCell::new(self));
+    //     let this_clone = this.clone();
+        
+    //     // Create the animation closure
+    //     let closure = Rc::new(RefCell::new(None));
+    //     let closure_clone = closure.clone();
+
+    //     *closure.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+    //         let mut this = this_clone.borrow_mut();
+    //         if let Err(e) = this.render_frame() {
+    //             error!("Render error: {:?}", e);
+    //             return;
+    //         }
+
+    //         // Update frame count
+    //         *this.frame_count.borrow_mut() += 1;
+
+    //         // Request next frame
+    //         if let Some(ref callback) = *closure_clone.borrow() {
+    //             if let Ok(id) = window_clone.request_animation_frame(callback.as_ref().unchecked_ref()) {
+    //                 this.animation_id = Some(id);
+    //             }
+    //         }
+    //     }) as Box<dyn FnMut()>));
+
+    //     // Start the animation
+    //     if let Some(ref callback) = *closure.borrow() {
+    //         let id = window.request_animation_frame(callback.as_ref().unchecked_ref())?;
+    //         let mut this = this.borrow_mut();
+    //         this.animation_id = Some(id);
+    //         this.animation_closure = Some(closure);
+    //     }
+
+    //     Ok(())
+    // }
+    pub fn start_player_loop(&self) -> Result<(), JsValue> {
+        let window = window().expect("no global `window` exists");
+        let window = Rc::new(window);
+        let window_clone = window.clone();
+    
+        let callback_ref = self.animation_callback.clone();
+        let context = self.context.clone();
+    
+        // Create a simple animation closure
+        let new_callback = Closure::wrap(Box::new(move || {
+            if let Some(ref ctx) = context {
+                // Clear and draw something
+                ctx.clear_rect(0.0, 0.0, 640.0, 480.0);
+                
+                // Use the non-deprecated way to set fill style
+                let style = JsValue::from_str("blue");
+                ctx.set_fill_style(&style);
+                
+                ctx.fill_rect(50.0, 50.0, 100.0, 100.0);
+            }
+    
+            // Request next frame using the cloned window
+            if let Some(ref callback) = *callback_ref.borrow() {
+                let _ = window_clone.request_animation_frame(callback.as_ref().unchecked_ref());
+            }
+        }) as Box<dyn FnMut()>);
+    
+        // Store the new callback
+        *self.animation_callback.borrow_mut() = Some(new_callback);
+    
+        // Start the animation with the original window
+        if let Some(ref callback) = *self.animation_callback.borrow() {
+            window.request_animation_frame(callback.as_ref().unchecked_ref())?;
+        }
+    
+        Ok(())
+    }
+
+    fn generate_debug_pattern(&self, frame_data: &mut [u8]) {
+        let time = (*self.frame_count.borrow() as f64) * 0.05;
+        
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = ((y * self.width + x) * 4) as usize;
+                
+                // Create animated color pattern
+                let r = ((((x as f64) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                let g = ((((y as f64) * 0.01 + time).cos() + 1.0) * 127.5) as u8;
+                let b = (((((x + y) as f64) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
+                
+                frame_data[idx] = r;     // R
+                frame_data[idx + 1] = g; // G
+                frame_data[idx + 2] = b; // B
+                frame_data[idx + 3] = 255; // A
+            }
+        }
+    }
 
 
     #[wasm_bindgen]
     pub async fn initialize_render_context(&mut self, canvas: HtmlCanvasElement) -> Result<String, JsValue> {
-        self.canvas = Some(canvas.clone());
+        // Store canvas dimensions
+        self.width = canvas.width();
+        self.height = canvas.height();
         
-        match RenderContext::create_from_canvas(canvas, self.width, self.height).await {
-            Ok(context) => {
-                self.render_context = Some(context);
-                Ok("WebGPU context initialized successfully".to_string())
-            },
-            Err(e) => Err(JsValue::from_str(&format!("Failed to initialize WebGPU context: {:?}", e)))
-        }
+        // Get and store 2D context
+        let context = canvas
+            .get_context("2d")?
+            .unwrap()
+            .dyn_into::<CanvasRenderingContext2d>()?;
+
+        // Store both canvas and context
+        self.canvas = Some(canvas);
+        self.context = Some(context);
+        
+        info!("2D context initialized with canvas dimensions {}x{}", self.width, self.height);
+        Ok("2D context initialized successfully".to_string())
     }
 
     #[wasm_bindgen]
@@ -468,11 +311,7 @@ impl IMFDecoder {
 
         // Add diagnostic info
         let diagnostics = js_sys::Object::new();
-        js_sys::Reflect::set(
-            &diagnostics,
-            &"frameCounter".into(),
-            &(self.frame_count as i32).into()
-        ).unwrap();
+
         js_sys::Reflect::set(
             &diagnostics,
             &"diagnosticMode".into(),
@@ -483,6 +322,12 @@ impl IMFDecoder {
             &capabilities,
             &"diagnostics".into(),
             &diagnostics
+        ).unwrap();
+
+        js_sys::Reflect::set(
+            &diagnostics,
+            &"frameCount".into(),
+            &JsValue::from_f64(*self.frame_count.borrow() as f64)
         ).unwrap();
 
         capabilities.into()
@@ -499,11 +344,10 @@ impl IMFDecoder {
     pub fn get_status(&self) -> JsValue {
         let status = js_sys::Object::new();
 
-        // Basic status
         js_sys::Reflect::set(
             &status,
             &"initialized".into(),
-            &self.render_context.is_some().into()
+            &(self.canvas.is_some() && self.context.is_some()).into()
         ).unwrap();
 
         js_sys::Reflect::set(
@@ -517,20 +361,13 @@ impl IMFDecoder {
         js_sys::Reflect::set(
             &metrics,
             &"frameCount".into(),
-            &(self.frame_count as i32).into()
+            &JsValue::from_f64(*self.frame_count.borrow() as f64)
         ).unwrap();
         
-        if let Some(window) = web_sys::window() {
-            if let Some(perf) = window.performance() {
-                js_sys::Reflect::set(
-                    &metrics,
-                    &"lastFrameTime".into(),
-                    &self.last_frame_time.into()
-                ).unwrap();
-            }
-        }
-
+   
         js_sys::Reflect::set(&status, &"metrics".into(), &metrics).unwrap();
+        
+
 
         // Queue status using correct method names
         let queue_status = js_sys::Object::new();
@@ -634,67 +471,13 @@ impl IMFDecoder {
         status.into()
     }
 
-    #[wasm_bindgen]
-    pub fn start_player_loop(&mut self) -> Result<(), JsValue> {
-        let decoder_ptr = self as *mut IMFDecoder;
-        let callback_fn = Box::new(move || {
-            let decoder = unsafe { &mut *decoder_ptr };
-            
-            debug!("Animation frame callback start");
-            if let Err(e) = decoder.render_frame() {
-                error!("Render error: {:?}", e);
-                return;
-            }
-            
-            // Request next frame if window exists
-            if let Some(window) = web_sys::window() {
-                if let Some(closure) = &decoder.animation_closure {
-                    if let Ok(id) = window.request_animation_frame(closure.as_ref().unchecked_ref()) {
-                        debug!("Scheduled next frame with id: {}", id);
-                        decoder.animation_id = Some(id);
-                    }
-                }
-            }
-            
-            decoder.frame_count += 1;
-            debug!("Animation frame callback complete");
-        });
-
-        // Create the animation closure
-        let closure = Closure::wrap(callback_fn as Box<dyn FnMut()>);
-
-        // Start the animation loop
-        let window = web_sys::window()
-            .ok_or_else(|| JsValue::from_str("No window found"))?;
-
-        let id = window.request_animation_frame(closure.as_ref().unchecked_ref())?;
-        debug!("Initial animation frame scheduled with id: {}", id);
-        
-        self.animation_id = Some(id);
-        self.animation_closure = Some(closure);
-
-        Ok(())
-    }
+    
     #[wasm_bindgen]
     pub fn stop_player_loop(&mut self) {
-        debug!("Stopping player loop");
-        
-        // Cancel animation frame
-        if let Some(id) = self.animation_id.take() {
-            if let Some(window) = web_sys::window() {
-                debug!("Canceling animation frame {}", id);
-                let _ = window.cancel_animation_frame(id);
-            }
-        }
-
-        // Drop the closure
-        if self.animation_closure.take().is_some() {
-            debug!("Animation closure dropped");
-        }
-        
-        info!("Player loop stopped");
+        // Drop the animation callback
+        self.animation_callback.borrow_mut().take();
+        debug!("Animation stopped");
     }
-
 
     #[wasm_bindgen(getter)]
     pub fn diagnostic_mode(&self) -> bool {
@@ -774,141 +557,70 @@ impl IMFDecoder {
         Ok(format!("Successfully processed {} tokens", token_count))
     }
 
-    fn generate_debug_pattern(&self, frame_data: &mut [u8]) {
-        let time = (self.frame_count as f32) * 0.05;
-        
-        for y in 0..self.height {
-            for x in 0..self.width {
-                let idx = ((y * self.width + x) * 4) as usize;
-                
-                // Create animated color pattern
-                let r = ((((x as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
-                let g = ((((y as f32) * 0.01 + time).cos() + 1.0) * 127.5) as u8;
-                let b = (((((x + y) as f32) * 0.01 + time).sin() + 1.0) * 127.5) as u8;
-                
-                frame_data[idx] = r;     // R
-                frame_data[idx + 1] = g; // G
-                frame_data[idx + 2] = b; // B
-                frame_data[idx + 3] = 255; // A
-            }
-        }
-    }
 
 
-     fn render_frame(&mut self) -> Result<(), JsValue> {
+    fn render_frame(&mut self) -> Result<(), JsValue> {
         debug!("Starting render frame");
         
-        let context = self.render_context.as_ref()
-            .ok_or_else(|| {
-                error!("Render context not initialized");
-                JsValue::from_str("Render context not initialized")
-            })?;
+        if let Some(context) = &self.context {
+            let width = self.width;
+            let height = self.height;
 
-        if self.debug_mode {
-            // Generate debug pattern
-            let mut frame_data = vec![0u8; (self.width * self.height * 4) as usize];
-            self.generate_debug_pattern(&mut frame_data);
+            // If in debug mode, generate a test pattern
+            if self.debug_mode {
+                let mut data = vec![0u8; (width * height * 4) as usize];
+                self.generate_debug_pattern(&mut data);
 
-            // Write debug pattern directly to texture
-            context.queue.write_texture(
-                ImageCopyTexture {
-                    texture: &context.texture,
-                    mip_level: 0,
-                    origin: Origin3d::ZERO,
-                    aspect: TextureAspect::All,
-                },
-                &frame_data,
-                ImageDataLayout {
-                    offset: 0,
-                    bytes_per_row: Some(self.width * 4),
-                    rows_per_image: Some(self.height),
-                },
-                Extent3d {
-                    width: self.width,
-                    height: self.height,
-                    depth_or_array_layers: 1,
-                },
-            );
-        } else {
-            // Original frame queue processing
-            if let Some(frame) = self.frame_queue.process_next() {
-                context.queue.write_texture(
-                    ImageCopyTexture {
-                        texture: &context.texture,
-                        mip_level: 0,
-                        origin: Origin3d::ZERO,
-                        aspect: TextureAspect::All,
-                    },
-                    &frame.data,
-                    ImageDataLayout {
-                        offset: 0,
-                        bytes_per_row: Some(self.width * 4),
-                        rows_per_image: Some(self.height),
-                    },
-                    Extent3d {
-                        width: self.width,
-                        height: self.height,
-                        depth_or_array_layers: 1,
-                    },
-                );
+                let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+                    Clamped(&data),
+                    width,
+                    height
+                )?;
+
+                context.put_image_data(&image_data, 0.0, 0.0)?;
+            } else {
+                // Regular frame processing from queue
+                if let Some(frame) = self.frame_queue.process_next() {
+                    let image_data = ImageData::new_with_u8_clamped_array_and_sh(
+                        Clamped(&frame.data),
+                        width,
+                        height
+                    )?;
+                    context.put_image_data(&image_data, 0.0, 0.0)?;
+                }
             }
-        }
 
-        let mut encoder = context.device.create_command_encoder(&CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
-        });
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("Main Render Pass"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &context.texture_view,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Load,  // Changed to Load since we're using the texture directly
-                        store: true,
-                    },
-                })],
-                depth_stencil_attachment: None,
-            });
-
-            render_pass.set_pipeline(&context.pipeline);
-            render_pass.set_bind_group(0, &context.bind_group, &[]);
-            render_pass.set_vertex_buffer(0, context.vertex_buffer.slice(..));
-            render_pass.draw(0..4, 0..1);
-        }
-
-        context.queue.submit(std::iter::once(encoder.finish()));
-
-        if self.diagnostic_mode {
-            self.update_metrics();
+            if self.diagnostic_mode {
+                self.update_metrics();
+            }
         }
 
         Ok(())
     }
 
+    fn update_metrics(&self) {
+        // if let Some(window) = web_sys::window() {
+        //     if let Some(performance) = window.performance() {
+        //         let now = performance.now();
+        //         // let frame_time = now - self.last_frame_time.get();
+        //         // self.last_frame_time.set(now);
 
-    fn update_metrics(&mut self) {
-        if let Some(window) = web_sys::window() {
-            if let Some(_performance) = window.performance() {
-                let now = _performance.now();
-                let frame_time = now - self.last_frame_time;
-                self.last_frame_time = now;
-
-                let fps = 1000.0 / frame_time;
-                info!("Frame {} metrics:", self.frame_count);
-                debug!("  - Frame time: {:.2}ms", frame_time);
-                debug!("  - FPS: {:.2}", fps);
-                debug!("  - Queue status: {:?}", self.frame_queue.get_queue_sizes());
+        //         let fps = 1000.0 / frame_time;
+        //         let frame_count = self.frame_count.get();
                 
-                if self.frame_count % 60 == 0 {
-                    info!("Performance report:");
-                    info!("  - Average FPS: {:.2}", fps);
-                    info!("  - Frame time: {:.2}ms", frame_time);
-                    info!("  - Frames processed: {}", self.frame_count);
-                }
-            }
-        }
+        //         info!("Frame {} metrics:", frame_count);
+        //         debug!("  - Frame time: {:.2}ms", frame_time);
+        //         debug!("  - FPS: {:.2}", fps);
+        //         debug!("  - Queue status: {:?}", self.frame_queue.get_queue_sizes());
+                
+        //         if frame_count % 60 == 0 {
+        //             info!("Performance report:");
+        //             info!("  - Average FPS: {:.2}", fps);
+        //             info!("  - Frame time: {:.2}ms", frame_time);
+        //             info!("  - Frames processed: {}", frame_count);
+        //         }
+        //     }
+        // }
     }
 
     #[wasm_bindgen]
