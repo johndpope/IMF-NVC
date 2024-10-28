@@ -42,7 +42,6 @@ class TestUI {
     };
 
     constructor() {
-        // First ensure the document is ready
         if (document.readyState === 'loading') {
             document.addEventListener('DOMContentLoaded', () => this.initialize());
         } else {
@@ -51,11 +50,14 @@ class TestUI {
     }
 
     private initialize() {
+        // Add setup debug panel before initializing elements
         this.setupDebugPanel();
         this.initializeElements();
         this.setupEventListeners();
         this.setupCanvas();
+        this.logInterceptor = logInterceptor;
     }
+    
 
     private setupCanvas() {
         this.canvas = document.getElementById('decoder-canvas') as HTMLCanvasElement;
