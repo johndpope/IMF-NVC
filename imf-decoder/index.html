@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>IMF Decoder Test</title>
+    <link rel="stylesheet" href="styles/styles.css">
+</head>
+<body>
+    <div class="test-panel">
+        <h1>IMF Decoder Test</h1>
+        
+        <!-- Status Display -->
+        <div class="status-panel">
+            <div class="status-item">
+                <span class="status-label">Player Status:</span>
+                <span id="player-status" class="status-value status-idle">Idle</span>
+            </div>
+            <div class="status-item">
+                <span class="status-label">Decoder Status:</span>
+                <span id="decoder-status" class="status-value status-idle">Idle</span>
+            </div>
+        </div>
+
+        <!-- Debug Panel -->
+        <div class="debug-panel">
+            <h3>Debug Status</h3>
+            <div class="status-item">
+                <span class="status-label">Debug Mode:</span>
+                <span id="debug-status" class="status-value status-disabled">Disabled</span>
+            </div>
+            <div class="debug-controls">
+                <button id="enableDebug" class="debug-toggle">Enable Debug</button>
+                <button id="disableDebug" class="debug-toggle">Disable Debug</button>
+            </div>
+        </div>
+
+        <!-- Metrics Panel -->
+        <div class="metrics-panel">
+            <h3>Debug Metrics</h3>
+            <div class="metrics-grid">
+                <div class="metric-item">
+                    <div class="status-label">Frame Count:</div>
+                    <div id="frame-count">0</div>
+                </div>
+                <div class="metric-item">
+                    <div class="status-label">Frame Time:</div>
+                    <div id="frame-time">0 ms</div>
+                </div>
+                <div class="metric-item">
+                    <div class="status-label">Queue Size:</div>
+                    <div id="queue-size">0</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Canvas -->
+        <canvas id="decoder-canvas" width="640" height="480"></canvas>
+
+        <!-- Control Buttons -->
+        <div class="button-group">
+            <button id="verifyWasm" class="test-button">Verify WASM</button>
+            <button id="initDecoder" class="test-button" disabled>Initialize Decoder</button>
+            <button id="startDecoder" class="test-button" disabled>Start Decoder</button>
+            <button id="processFrame" class="test-button" disabled>Process Frame</button>
+            <button id="pauseDecoder" class="test-button" disabled>Pause Decoder</button>
+            <button id="clearLog" class="test-button">Clear Log</button>
+        </div>
+
+        <!-- Debug Output -->
+        <div id="log"></div>
+    </div>
+</body>
+</html>

@@ -1,48 +1,68 @@
-import { useEffect, useState,useRef } from 'react'
-import { ONNXModelLoader } from '../utils/ONNXModelLoader'
+import type { NextPage } from 'next'
+import dynamic from 'next/dynamic'
+import NVCClient from '@/components/NVCClient';
+import { useEffect } from 'react';
 
-export default function Home() {
-  const [inferenceResult, setInferenceResult] = useState<string>('')
+async function registerServiceWorker() {
+  if (!('serviceWorker' in navigator)) {
+    console.log('Service Workers not supported');
+    return;
+  }
 
-  const inferenceRun = useRef(false)
+  try {
+    // Unregister any existing service workers first
+    const existingRegistrations = await navigator.serviceWorker.getRegistrations();
+    await Promise.all(existingRegistrations.map(reg => reg.unregister()));
 
-  useEffect(() => {
-    async function runInference() {
-      if (inferenceRun.current) return
-      inferenceRun.current = true
+    // Register new service worker with specific options
+    const registration = await navigator.serviceWorker.register('/service-worker.js', {
+      scope: '/',
+      // Add registration options for development
+      updateViaCache: 'none'
+    });
 
-      try {
-        const modelLoader = new ONNXModelLoader()
-        await modelLoader.loadModel('/imf_encoder.onnx')
-        
-        const xCurrent = await ONNXModelLoader.imageToFloat32Array('/frame1.png')
-        const xReference = await ONNXModelLoader.imageToFloat32Array('/frame2.png')
-        
-        const [fr, tr, tc] = await modelLoader.runInference(xCurrent, xReference)
-        
-        setInferenceResult(JSON.stringify({
-          fr: Array.from(fr.slice(0, 5)),
-          tr: Array.from(tr.slice(0, 5)),
-          tc: Array.from(tc.slice(0, 5))
-        }, null, 2))
-      } catch (error) {
-        console.error('Error in inference:', error)
-        setInferenceResult(`Error: ${error instanceof Error ? error.message : String(error)}`)
-      }
+    // Log registration details
+    console.log('Service Worker registration successful with scope:', registration.scope);
+
+    // Handle updates
+    registration.addEventListener('updatefound', () => {
+      const newWorker = registration.installing;
+      console.log('Service Worker update found!', newWorker);
+
+      newWorker?.addEventListener('statechange', () => {
+        console.log('Service Worker state changed:', newWorker.state);
+      });
+    });
+
+    // Force activation
+    if (registration.active) {
+      registration.active.postMessage({ type: 'SKIP_WAITING' });
     }
 
-    runInference()
-  }, [])
+  } catch (error) {
+    console.error('Service Worker registration failed:', error);
+    // Log additional error details
+    if (error instanceof Error) {
+      console.error('Error name:', error.name);
+      console.error('Error message:', error.message);
+    }
+  }
+}
+
+const Home: NextPage = () => {
+  useEffect(() => {
+    if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
+      registerServiceWorker();
+    }
+  }, []);
+
 
   return (
-    <div>
-      <h1>IMF Neural Video Codec POC</h1>
-      <div>
-        <img src="/frame1.png" alt="Frame 1" width={256} height={256} />
-        <img src="/frame2.png" alt="Frame 2" width={256} height={256} />
-      </div>
-      <h2>Inference Results:</h2>
-      <pre>{inferenceResult}</pre>
+    <div className="min-h-screen p-4">
+      <h1 className="text-2xl font-bold mb-4">TensorFlow.js Next.js Demo</h1>
+        <NVCClient /> 
     </div>
   )
 }
+
+export default Home

@@ -1,9 +1,11 @@
 {
   "compilerOptions": {
+    "target": "es2020",                    // Upgraded from es2017 for better WebAssembly support
     "lib": [
       "dom",
       "dom.iterable",
-      "esnext"
+      "esnext",
+      "webworker"
     ],
     "allowJs": true,
     "skipLibCheck": true,
@@ -16,25 +18,36 @@
     "isolatedModules": true,
     "jsx": "preserve",
     "incremental": true,
-    "plugins": [
-      {
-        "name": "next"
-      }
-    ],
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
-    }
+      "@/*": ["./js/*"],                   // Changed to js folder for TypeScript files
+      "@pkg/*": ["./pkg/*"],              // Added for WASM package
+      "@wasm/*": ["./src/*"]              // Added for Rust source files
+    },
+    "typeRoots": [
+      "./node_modules/@types",
+      "./js/types"                         // Added for project-specific types
+    ],
+    "types": [
+      "node",
+      "webpack",
+      "web-worker",
+      "@webassembly/types"                 // Added for WebAssembly types
+    ]
   },
   "include": [
-    "next-env.d.ts",
-    "**/*.ts",
-    "**/*.tsx",
-    ".next/types/**/*.ts",
-    "build/types/**/*.ts"
+    "js/**/*.ts",
+    "js/**/*.tsx",
+    "pkg/**/*.ts",
+    "pkg/**/*.d.ts"
   ],
   "exclude": [
-    "node_modules"
+    "node_modules",
+    "dist",
+    "src",                                 // Exclude Rust source files
+    ".next",
+    "build"
   ]
 }

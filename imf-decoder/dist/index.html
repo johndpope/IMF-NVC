@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset="utf-8"><title>IMF Decoder Test</title><style>.test-panel {
+            margin: 20px;
+            padding: 20px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+        .test-button {
+            padding: 10px 20px;
+            margin: 5px;
+            border: none;
+            border-radius: 4px;
+            background-color: #007bff;
+            color: white;
+            cursor: pointer;
+        }
+        .test-button:disabled {
+            background-color: #ccc;
+        }
+        .status-panel {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+        }
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .status-label {
+            font-weight: bold;
+        }
+        .status-value {
+            padding: 2px 8px;
+            border-radius: 3px;
+        }
+        .status-idle { background-color: #e2e3e5; }
+        .status-ready { background-color: #d4edda; }
+        .status-playing { background-color: #cce5ff; }
+        .status-paused { background-color: #fff3cd; }
+        .status-error { background-color: #f8d7da; }
+        #log {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: monospace;
+        }</style><script defer="defer" src="main.js"></script><script defer="defer" src="worker.js"></script></head><body><div class="test-panel"><h1>IMF Decoder Test</h1><div class="status-panel"><div class="status-item"><span class="status-label">Player Status:</span> <span id="player-status" class="status-value status-idle">Idle</span></div><div class="status-item"><span class="status-label">Decoder Status:</span> <span id="decoder-status" class="status-value status-idle">Idle</span></div></div><div><button id="verifyWasm" class="test-button">Verify WASM</button> <button id="initDecoder" class="test-button" disabled="disabled">Initialize Decoder</button> <button id="startDecoder" class="test-button" disabled="disabled">Start Decoder</button> <button id="processFrame" class="test-button" disabled="disabled">Process Frame</button> <button id="pauseDecoder" class="test-button" disabled="disabled">Pause Decoder</button> <button id="clearLog" class="test-button">Clear Log</button></div><div id="log"></div></div></body></html>
